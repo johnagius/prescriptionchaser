@@ -91,6 +91,10 @@
   .editmail{background:#0d1117;border:1px solid var(--line);color:var(--muted);border-radius:6px;
     padding:2px 7px;font-size:12px;font-weight:600;margin-left:6px}
   .editmail:hover{border-color:var(--accent);color:var(--ink)}
+  .editcarer{background:var(--accent2);border:none;color:#fff;border-radius:7px;
+    padding:4px 11px;font-size:12.5px;font-weight:700;margin-left:10px;white-space:nowrap}
+  .editcarer:hover{filter:brightness(1.12)}
+  .editcarer .ccn{background:rgba(255,255,255,.25);border-radius:8px;padding:0 6px;margin-left:5px;font-size:11px}
   .ovr{color:var(--accent);font-size:12px;cursor:default}
   td.num{text-align:right;font-variant-numeric:tabular-nums}
   .cust{font-family:ui-monospace,Menlo,monospace;color:var(--accent2)}
@@ -2250,7 +2254,7 @@ function emailCell(r){
   const txt = r.email ? esc(r.email) : '<span style="color:#5c6773;font-style:italic">no email</span>';
   const tag = over ? ' <span class="ovr" title="custom email (saved)">★</span>' : '';
   return '<td class="email'+(r.email?"":" none")+'">'+txt+tag
-    +' <button class="editmail" data-cust="'+esc(r.cust)+'" title="Replace email">✎</button></td>';
+    +' <button class="editmail" data-cust="'+esc(r.cust)+'" title="Set this one patient&#39;s email only">✎</button></td>';
 }
 function patientCells(r){
   return '<td class="cust">'+esc(r.cust)+'</td>'+
@@ -2312,7 +2316,9 @@ function renderGrouped(rows){
     if(!g.emails.length) action='<button class="send none" disabled>no email</button>';
     else if(done) action='<button class="send done" data-key="'+esc(g.key)+'">Sent '+ago(g.key)+'</button>';
     else action='<button class="send" data-key="'+esc(g.key)+'">Email all '+g.patients.length+'</button>';
-    const editBtn = '<button class="editmail" data-carerkey="'+esc(g.key)+'" title="Replace this carer\'s email">✎ email</button>';
+    const ccN = g.primaryBase ? ccFor(g.primaryBase).length : 0;
+    const editBtn = '<button class="editcarer" data-carerkey="'+esc(g.key)+'" title="Replace this carer\'s email or add extra recipients">＋ Manage emails'
+      + (ccN? ' <span class="ccn">'+(g.emails.length)+'</span>' : '') + '</button>';
     hdr.innerHTML='<td colspan="9"><span class="carerlabel">'+contact+'</span> '
       +'<span class="cnt">· '+g.patients.length+' patient'+(g.patients.length>1?'s':'')
       +(g.phones.length?' · '+esc(g.phones.join(" / ")):'')+'</span> '+editBtn+'</td>'
@@ -2332,11 +2338,11 @@ function wireRowButtons(){
   tb.querySelectorAll("button.send:not(.none)").forEach(b=>{
     b.onclick=()=>{ blocked=0; const g=CARERS.find(x=>x.key===b.dataset.key); open1(g); };
   });
+  tb.querySelectorAll("button.editcarer").forEach(b=>{
+    b.onclick=()=>{ const g=CARERS.find(x=>x.key===b.dataset.carerkey); if(g) openCarerEditor(g); };
+  });
   tb.querySelectorAll("button.editmail").forEach(b=>{
-    b.onclick=()=>{
-      if(b.dataset.carerkey){ const g=CARERS.find(x=>x.key===b.dataset.carerkey); if(g) openCarerEditor(g); }
-      else { const r=RESULTS.find(x=>x.cust===b.dataset.cust); if(r) editOneEmail(r); }
-    };
+    b.onclick=()=>{ const r=RESULTS.find(x=>x.cust===b.dataset.cust); if(r) editOneEmail(r); };
   });
 }
 
