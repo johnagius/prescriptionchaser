@@ -1,0 +1,8 @@
+name = "prescriptionchaser"
+main = "src/worker.js"
+compatibility_date = "2025-06-01"
+
+# The app is a single static HTML file served from ./public.
+[assets]
+directory = "./public"
+binding = "ASSETS"

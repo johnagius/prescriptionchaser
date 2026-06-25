@@ -1,0 +1,16 @@
+{
+  "name": "prescriptionchaser",
+  "version": "1.0.0",
+  "private": true,
+  "description": "In-browser tool to find oxygen patients to chase for a renewed prescription. Deployed as a Cloudflare Worker.",
+  "scripts": {
+    "build": "python3 build/inject-scripts.py",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "start": "wrangler dev"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.61.1",
+    "wrangler": "^4.0.0"
+  }
+}
