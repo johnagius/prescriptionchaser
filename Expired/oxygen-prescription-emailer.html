@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Oxygen Prescription Email Sender</title>
+<style>
+  :root{
+    --bg:#0f1419; --panel:#1a2129; --line:#2a343f; --ink:#e6edf3;
+    --muted:#8b98a5; --accent:#d2691e; --accent2:#0d7d7d; --ok:#2ea043; --warn:#d29922;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font:15px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+    background:var(--bg);color:var(--ink);padding:24px}
+  .wrap{max-width:920px;margin:0 auto}
+  h1{font-size:20px;margin:0 0 4px}
+  .sub{color:var(--muted);margin:0 0 20px;font-size:13px}
+  .bar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;
+    background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:16px}
+  .bar input{flex:1;min-width:200px;background:#0d1117;border:1px solid var(--line);color:var(--ink);
+    border-radius:8px;padding:9px 12px;font-size:14px}
+  button{cursor:pointer;border:none;border-radius:8px;padding:9px 16px;font-size:14px;font-weight:600}
+  .primary{background:var(--accent);color:#fff}
+  .primary:hover{filter:brightness(1.08)}
+  .ghost{background:#0d1117;border:1px solid var(--line);color:var(--ink)}
+  .ghost:hover{border-color:var(--accent)}
+  .stat{color:var(--muted);font-size:13px;margin-left:auto}
+  .stat b{color:var(--ink)}
+  table{width:100%;border-collapse:collapse;background:var(--panel);
+    border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  th,td{padding:10px 14px;text-align:left;border-bottom:1px solid var(--line);font-size:14px;vertical-align:top}
+  th{background:#0d1117;color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+  tr:last-child td{border-bottom:none}
+  tr.sent td{opacity:.45}
+  .email{font-weight:600}
+  .patients{color:var(--muted);font-size:13px;margin-top:3px}
+  .cust{font-family:ui-monospace,Menlo,monospace;color:var(--accent2)}
+  .badge{display:inline-block;background:var(--accent2);color:#fff;font-size:11px;font-weight:700;
+    border-radius:10px;padding:1px 8px;margin-left:6px;vertical-align:middle}
+  td .send{background:var(--accent);color:#fff;padding:6px 14px;font-size:13px}
+  td .send.done{background:var(--ok)}
+  .note{background:#1a2129;border:1px solid var(--line);border-left:3px solid var(--warn);
+    border-radius:8px;padding:12px 14px;margin-bottom:16px;font-size:13px;color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Oxygen Prescription — Email Sender</h1>
+  <p class="sub">One email per recipient. Administrators with several patients get a single combined email. Click <b>Open all visible</b> to queue every compose tab.</p>
+
+  <div class="note">
+    Anyone emailed in the <b>last 24 hours is skipped</b> and shown greyed-out at the bottom — so you can safely re-run without double-sending (this is remembered even if you close the file). To avoid the browser blocking the burst, tabs open one every 0.6s; if any are blocked you'll get a warning and they stay marked un-sent. Best practice: <b>allow pop-ups</b> for this page, then use <b>Open next 10</b> repeatedly. <b>High importance</b> isn't supported by Outlook web's compose link — set it manually via <b>\u22ef \u2192 Set importance \u2192 High</b>.
+  </div>
+
+  <div class="bar">
+    <input id="search" placeholder="Filter by email, name or customer no…" oninput="render()">
+    <button class="primary" onclick="openAll()">Open all visible</button>
+    <button class="ghost" onclick="openBatch(10)">Open next 10</button>
+    <button class="ghost" onclick="resetSent()">Reset</button>
+    <span class="stat"><b id="cnt">0</b> remaining · <b id="pcnt">0</b> patients · <b id="sentCnt">0</b> sent (24h)</span>
+  </div>
+
+  <table>
+    <thead><tr><th>Recipient</th><th style="width:110px">Action</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+</div>
+
+<script>
+const DATA = [{"email": "ritianne.borg@caremalta.com", "patients": [{"cust": "D02080", "name": "CAMILLERI FRANCIS"}, {"cust": "D01976", "name": "AZZOPARDI MARIA"}, {"cust": "D01978", "name": "CARUANA CARMEL"}, {"cust": "D01975", "name": "CHRISTIE ELENA"}, {"cust": "D01977", "name": "CINI MARIA"}]}, {"email": "clinic.casaleone@maltadiocese.org", "patients": [{"cust": "D01995", "name": "ZAHRA ANGELO"}, {"cust": "D01993", "name": "JOSEPH ELLUL"}, {"cust": "D01994", "name": "MIFSUD BENEDICT"}, {"cust": "D01013", "name": "SULTANA FRANCESCA"}, {"cust": "D01997", "name": "JOSEPHINE VELLA"}]}, {"email": "info@jasminenursinghome.com.mt", "patients": [{"cust": "D02164", "name": "ABDILLA SALVINA"}, {"cust": "D02165", "name": "SCHEMBRI MANWEL"}, {"cust": "D02166", "name": "PERRIERA PAUL"}]}, {"email": "cynthia.scerri@caremalta.com", "patients": [{"cust": "D01846", "name": "CHETCUTI VALERIE"}, {"cust": "D01945", "name": "FELICE MARY"}]}, {"email": "shellfrendo@gmail.com", "patients": [{"cust": "D00808", "name": "FRENDO CARMEL"}, {"cust": "D01910", "name": "FRENDO GEORGINA"}]}, {"email": "anthony.caruana@caremalta.com", "patients": [{"cust": "D01894", "name": "UNGARO MARY GIOVANNA K/A MARY JANE"}]}, {"email": "jeanette.falzon@gov.mt", "patients": [{"cust": "D01751", "name": "FALZON GRAZIA"}]}, {"email": "xerrim6@gmail.com", "patients": [{"cust": "D01990", "name": "XERRI TEDDY"}]}, {"email": "marleneazzopardi@hotmail.com", "patients": [{"cust": "D01042", "name": "AZZOPARDI MARLENE JOANNA ANTONIA"}]}, {"email": "INFO@CASA-ANTONIA.COM.MT", "patients": [{"cust": "D02336", "name": "GRECH JOHN"}]}, {"email": "emmanuelzammit78@gmail.com", "patients": [{"cust": "D01268", "name": "ZAMMIT PAWLINA"}]}, {"email": "mary90camilleri@icloud.com", "patients": [{"cust": "D01151", "name": "CAMILLERI MARIA SALVINA"}]}, {"email": "josephcauchi23@hotmail.com", "patients": [{"cust": "D01789", "name": "CAUCHI ANTHONY"}]}, {"email": "rv.careadministrator@caremalta.com", "patients": [{"cust": "D01926", "name": "DARMANIN THERESA"}]}, {"email": "spartoon94@gmail.com", "patients": [{"cust": "D01524", "name": "ZAMMIT CORDINA STEPHEN"}]}, {"email": "theresaagius46@gmail.com", "patients": [{"cust": "D01073", "name": "AGIUS THERESA"}]}, {"email": "miriamzammit1@gmail.com", "patients": [{"cust": "D01818", "name": "AZZOPARDI JOSEPH"}]}, {"email": "luwanagrech76@gmail.com", "patients": [{"cust": "D01094", "name": "BARTOLO LUWANA CENSINA"}]}, {"email": "toniboqqoq@gmail.com", "patients": [{"cust": "D00974", "name": "BORG HELEN"}]}, {"email": "srmargaretcassar@gmail.com", "patients": [{"cust": "D02222", "name": "BORG JOSEPH FR"}]}, {"email": "giovannacachia@hotmail.com", "patients": [{"cust": "D01611", "name": "CACHIA PIETRO"}]}, {"email": "marthtes210@gmail.com", "patients": [{"cust": "D01674", "name": "CAMILLERI JOLENE"}]}, {"email": "sarah.villasunlz@gmail.com", "patients": [{"cust": "D02002", "name": "CAMILLERI SALVINA"}]}, {"email": "michellecassar72@yahoo.co.uk", "patients": [{"cust": "D02257", "name": "CAUCHI CARMELA"}]}, {"email": "rachellegalea@yahoo.co.uk", "patients": [{"cust": "D01261", "name": "CHETCUTI RACHELLE (RACHELLE-DOREEN)"}]}, {"email": "bes1069@hotmail.com", "patients": [{"cust": "D02467", "name": "DEBONO SALVINA"}]}, {"email": "falzonalan@icloud.com", "patients": [{"cust": "D02684", "name": "FALZON ALAN"}]}, {"email": "JPGFARR@hotmail.com", "patients": [{"cust": "D00860", "name": "FARRUGIA JOHN"}]}, {"email": "charlie.dahka79@gmail.com", "patients": [{"cust": "D02419", "name": "FARRUGIA RITA"}]}, {"email": "philomeli@gmail.com", "patients": [{"cust": "D01394", "name": "GALEA MARIA"}]}, {"email": "gln.87166@gmail.com", "patients": [{"cust": "D02060", "name": "GALEA MARIO"}]}, {"email": "mariaformosa3666@gmail.com", "patients": [{"cust": "D02344", "name": "GATT ANNIE"}]}, {"email": "hiliraymond255257m@gmail.com", "patients": [{"cust": "D01313", "name": "HILI RAYMOND"}]}, {"email": "k_inguanez@hotmail.com", "patients": [{"cust": "D02131", "name": "INGUANEZ CARMEL"}]}, {"email": "csp.faa@caremalta.com", "patients": [{"cust": "D02489", "name": "MARIA CASSAR"}]}, {"email": "caroline@frogbat.com", "patients": [{"cust": "D01142", "name": "MIFSUD CAROLINE"}]}, {"email": "tifjoryan@gmail.com", "patients": [{"cust": "D01105", "name": "PACE CARMELA"}]}, {"email": "micheal.scicluna.54@gmail.com", "patients": [{"cust": "D01486", "name": "SCICLUNA CARMELA"}]}, {"email": "nazalineabela20@gmail.com", "patients": [{"cust": "D01797", "name": "ABELA LIAM"}]}, {"email": "sueciantar@icloud.com", "patients": [{"cust": "D01596", "name": "AQUILINA JOSEPH"}]}, {"email": "georatta@gmail.com", "patients": [{"cust": "D01160", "name": "ATTARD GEORGE"}]}, {"email": "noel.nattard@gmail.com", "patients": [{"cust": "D01332", "name": "ATTARD LUKE"}]}, {"email": "christianazzopardi215@gmail.com", "patients": [{"cust": "D01555", "name": "AZZOPARDI CARMEN"}]}, {"email": "esther.azzopardi@kmmaltairlines.com", "patients": [{"cust": "D02229", "name": "AZZOPARDI ESTHER"}]}, {"email": "kevazz025@gmail.com", "patients": [{"cust": "D02279", "name": "AZZOPARDI FRANCES"}]}, {"email": "georgem.azzopardi@gmail.com", "patients": [{"cust": "D02252", "name": "AZZOPARDI JOSEPHINE"}]}, {"email": "desiraisabelle@ymail.com", "patients": [{"cust": "D02208", "name": "AZZOPARDI MARIA CARMELA"}]}, {"email": "claudetbona@gmail.com", "patients": [{"cust": "D02224", "name": "BONAVIA CLAUDETTE"}]}, {"email": "johnborg02@gmail.com", "patients": [{"cust": "D01705", "name": "BORG ALFRED"}]}, {"email": "james.borg@um.edu.mt", "patients": [{"cust": "D02287", "name": "BORG JAMES LOUIS"}]}, {"email": "charlesborg33@hotmail.com", "patients": [{"cust": "D01323", "name": "BORG MARIA GRAZIA"}]}, {"email": "mgalakkad@gmail.com", "patients": [{"cust": "D00839", "name": "BORG MARY"}]}, {"email": "lorraine.agius30@gmail.com", "patients": [{"cust": "D02217", "name": "BUGEJA DORIS"}]}, {"email": "roger@klimaflo.com", "patients": [{"cust": "D02204", "name": "BUSIETTA ALFRED"}]}, {"email": "manuelf2004@gmail.com", "patients": [{"cust": "D02353", "name": "BUSUTTIL SALVINA"}]}, {"email": "jobuttigieg@hotmail.com", "patients": [{"cust": "D02320", "name": "BUTTIGIEG JOSETTE"}]}, {"email": "lorrainebutti@gmail.com", "patients": [{"cust": "D02138", "name": "BUTTIGIEG LORRAINE THERESA FRNACES"}]}, {"email": "203sqn@onvol.net", "patients": [{"cust": "D00852", "name": "CAMILLERI CONCETTA"}]}, {"email": "jcamilleri0220@gmail.com", "patients": [{"cust": "D02202", "name": "CAMILLERI JOSEPHINE"}]}, {"email": "ericcappello@gmail.com", "patients": [{"cust": "D01791", "name": "CAPPELLO JOSEPH"}]}, {"email": "geneve@onvol.net", "patients": [{"cust": "D01578", "name": "CARDONA DOLORES"}]}, {"email": "mmaagency@gmail.com", "patients": [{"cust": "D02139", "name": "CARDONA MARIO"}]}, {"email": "caruana.laurence@gmail.com", "patients": [{"cust": "D02334", "name": "CARUANA JOSEPHINE"}]}, {"email": "josephine.cassar04@gmail.com", "patients": [{"cust": "D01811", "name": "CASSAR LEWIS"}]}, {"email": "alexcassar777@gmail.com", "patients": [{"cust": "D02134", "name": "CASSAR MARIA THERESA"}]}, {"email": "annecray82@gmail.com", "patients": [{"cust": "D02365", "name": "CHETCUTI RAY AIDEN"}]}, {"email": "cilia.joseph1324@gmail.com", "patients": [{"cust": "D02322", "name": "CILIA JOSEPH"}]}, {"email": "piccolin3@gmail.com", "patients": [{"cust": "D02362", "name": "CUTAJAR ANTHONY"}]}, {"email": "costantino.debono@gmail.com", "patients": [{"cust": "D01082", "name": "DEBONO COSTANTINO"}]}, {"email": "manuel.degabriele84@gmail.com", "patients": [{"cust": "D02312", "name": "DEGABRIELE MANUEL"}]}, {"email": "jandgdelia@yahoo.com", "patients": [{"cust": "D02185", "name": "DELIA MARTIN"}]}, {"email": "fdelia76@gmail.com", "patients": [{"cust": "D02151", "name": "DELIA ROSANNA"}]}, {"email": "ken@ays.com.mt", "patients": [{"cust": "D02241", "name": "DONALDSON KENNETH"}]}, {"email": "elnaibheny630@gmail.com", "patients": [{"cust": "D02361", "name": "ELNAIB AGNESE"}]}, {"email": "stv684@gmail.com", "patients": [{"cust": "D02232", "name": "FARRUGIA KAI"}]}, {"email": "gfarr@isgozo.com", "patients": [{"cust": "D01660", "name": "FARRUGIA LAWRENCE"}]}, {"email": "pjfarr2@gmail.com", "patients": [{"cust": "D02277", "name": "FARRUGIA NAZZARENU"}]}, {"email": "layelvn619@gmail.com", "patients": [{"cust": "D01503", "name": "FENECH PAUL"}]}, {"email": "SIPACHL75@GMAIL.COM", "patients": [{"cust": "D01792", "name": "FITZGERALD CHLOE"}]}, {"email": "joeformosa@anual.net", "patients": [{"cust": "D02345", "name": "FORMOSA JOE"}]}, {"email": "ruthcaruana@hotmail.com", "patients": [{"cust": "D01014", "name": "FORMOSA JOSEPHINE"}]}, {"email": "mikeformosa65@hotmail.com", "patients": [{"cust": "D01687", "name": "FORMOSA MICHEAL"}]}, {"email": "miguelborg77@gmail.com", "patients": [{"cust": "D01795", "name": "GALEA CARMELO"}]}, {"email": "mainrick@onvol.net", "patients": [{"cust": "D02317", "name": "GALEA FRANCES"}]}, {"email": "degabrielenicky@gmail.com", "patients": [{"cust": "D02238", "name": "GALEA MARY"}]}, {"email": "jojoann511@gmail.com", "patients": [{"cust": "D02354", "name": "GALEA NOEL"}]}, {"email": "angeliczahra@yahoo.com", "patients": [{"cust": "D01515", "name": "GALEA ZACK"}]}, {"email": "lukecinisarreo@gov.mt", "patients": [{"cust": "D01146", "name": "GATT VINCENT"}]}, {"email": "jake.gianlanze@gmail.com", "patients": [{"cust": "D02240", "name": "GIANLANZE EMANUEL"}]}, {"email": "sistersalvina@gmail.com", "patients": [{"cust": "D02313", "name": "GRAVINO SR CLEMENZA"}]}, {"email": "joe9h5jg@gmail.com", "patients": [{"cust": "D02003", "name": "GRECH EMANUELA"}]}, {"email": "bartoloj.6@gmail.com", "patients": [{"cust": "D01958", "name": "GRIMA GEMMA"}]}, {"email": "karenfirman27@gmail.com", "patients": [{"cust": "D02239", "name": "GRISCTI MONICA"}]}, {"email": "farren.grixti85@gmail.com", "patients": [{"cust": "D02181", "name": "GRIXTI FARREN"}]}, {"email": "2626hilda@gmail.com", "patients": [{"cust": "D02356", "name": "MALLIA DORIS"}]}, {"email": "odettemallia145@gmail.com", "patients": [{"cust": "D01566", "name": "MALLIA ODETTE"}]}, {"email": "karenfarrugia81@gmail.com", "patients": [{"cust": "D01374", "name": "MANGION ANTHONY"}]}, {"email": "ilona.mercieca@hila.com.mt", "patients": [{"cust": "D02057", "name": "MANGION NATHALIE"}]}, {"email": "mmanicolo@gmail.com", "patients": [{"cust": "D02200", "name": "MANICOLO MARY"}]}, {"email": "sandrameilak@yahoo.com", "patients": [{"cust": "D02182", "name": "MEILAK THERESA"}]}, {"email": "micallefdiana@yahoo.com", "patients": [{"cust": "D02236", "name": "MICALLEF PAUL"}]}, {"email": "melvruss@hotmail.com", "patients": [{"cust": "D02329", "name": "MICALLEF SALIBA MADISON MARIE"}]}, {"email": "paxetbonummosta@gmail.com", "patients": [{"cust": "D02062", "name": "MIFSUD GIUDITTA"}]}, {"email": "maryannesaydon@gmail.com", "patients": [{"cust": "D01199", "name": "MIFSUD MARY ANNE"}]}, {"email": "dd.danieladeguara@gmail.com", "patients": [{"cust": "D02205", "name": "MIFSUD RITA"}]}, {"email": "kaireb2@gmail.com", "patients": [{"cust": "D02352", "name": "MIZZI FRANCO"}]}, {"email": "danattport@gmail.com", "patients": [{"cust": "D01121", "name": "PACE RHODA HILDA ELIZABETH"}]}, {"email": "ramona-preca@hotmail.com", "patients": [{"cust": "D02350", "name": "PRECA MARIA STELLA"}]}, {"email": "adriennecassar@gmail.com", "patients": [{"cust": "D02262", "name": "PULLICINO RAPHAEL"}]}, {"email": "isabelzammit01@gmail.com", "patients": [{"cust": "D01301", "name": "SALIBA CARMEN"}]}, {"email": "kidz1612@gmail.com", "patients": [{"cust": "D01424", "name": "SAPIANO GIOVANNA"}]}, {"email": "naduskavella@gmail.com", "patients": [{"cust": "D02235", "name": "SCERRI MICHAEL"}]}, {"email": "maryrose1410@yahoo.com", "patients": [{"cust": "D01044", "name": "SCERRI VINCENT"}]}, {"email": "kate@davincihealth.com", "patients": [{"cust": "D01460", "name": "SCHEMBRI EMMANUELE"}]}, {"email": "silvanaschembri1964@gmail.com", "patients": [{"cust": "D02254", "name": "SCHEMBRI MARIA"}]}, {"email": "sebastian.schembri.91@gmail.com", "patients": [{"cust": "D01469", "name": "SCHEMBRI SEBASTIAN"}]}, {"email": "sciberrasshania402@gmail.com", "patients": [{"cust": "D02346", "name": "SCIBERRAS ANTONIA"}]}, {"email": "d1982pierre@gmail.com", "patients": [{"cust": "D02342", "name": "SEROPYAN LYUDMILLA"}]}, {"email": "shandler64@gmail.com", "patients": [{"cust": "D01466", "name": "SHANDLER MARC STANLEY"}]}, {"email": "WAYNESPITERI@YMAIL.COM", "patients": [{"cust": "D02220", "name": "SPITERI VINCENT"}]}, {"email": "gtalbot50@gmail.com", "patients": [{"cust": "D01171", "name": "TALBOT MONICA"}]}, {"email": "claudio.a.tonna@lesa.gov.mt", "patients": [{"cust": "D02216", "name": "TONNA KUNCETTA"}]}, {"email": "monicaurry@hotmail.com", "patients": [{"cust": "D02283", "name": "URRY MONICA"}]}, {"email": "altheatanti@gmail.com", "patients": [{"cust": "D02305", "name": "VELLA JOSEPH"}]}, {"email": "carmike4@gmail.com", "patients": [{"cust": "D01771", "name": "VELLA PAULA"}]}, {"email": "gabrielvitale1998@gmail.com", "patients": [{"cust": "D02260", "name": "VITALE GABRIEL"}]}, {"email": "szammit@multigas.com", "patients": [{"cust": "D02272", "name": "ZAMMIT JANE"}]}, {"email": "marouska1996@icloud.com", "patients": [{"cust": "D02278", "name": "ZAMMIT MARIO"}]}, {"email": "rodneyzammit1207@gmail.com", "patients": [{"cust": "D01594", "name": "ZAMMIT RODNEY"}]}, {"email": "acauchi71@gmail.com", "patients": [{"cust": "D02269", "name": "ZERAFA FRANCES SR"}]}];
+// Persisted record of sends: { emailLowercase: timestampMs }
+const STORE_KEY = "oxygenEmailSends";
+const WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+function loadStore(){
+  try { return JSON.parse(localStorage.getItem(STORE_KEY)) || {}; }
+  catch(e){ return {}; }
+}
+function saveStore(s){
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(s)); } catch(e){}
+}
+let store = loadStore();
+
+// true if emailed within the last 24h
+function sentRecently(email){
+  const t = store[email.toLowerCase()];
+  return t && (Date.now() - t) < WINDOW_MS;
+}
+function markSent(email){
+  store[email.toLowerCase()] = Date.now();
+  saveStore(store);
+}
+function sentCount(){
+  return Object.keys(store).filter(e => (Date.now() - store[e]) < WINDOW_MS).length;
+}
+function ago(email){
+  const t = store[email.toLowerCase()];
+  if(!t) return "";
+  const m = Math.round((Date.now() - t) / 60000);
+  if(m < 1) return "just now";
+  if(m < 60) return m + "m ago";
+  return Math.round(m/60) + "h ago";
+}
+
+function body(patients){
+  const multi = patients.length > 1;
+  const list = patients.map(p => `${p.cust} \u2219 ${p.name}`).join("\n");
+  const intro = multi
+    ? "Please send us scans of the renewed medical oxygen prescriptions for the following patients:"
+    : "Please send us a scan of the renewed medical oxygen prescription for the following patient:";
+  const tail = multi
+    ? "These prescriptions are expired and the accounts are only temporarily active via temporary approvals.\n\nYou can reply to this email with the new scanned prescriptions."
+    : "The prescription is expired and the account is only temporarily active via a temporary approval.\n\nYou can reply to this email with the new scanned prescription.";
+  return `Dear Sir/Madam,\n\n${intro}\n\n${list}\n\n${tail}\n\nBr,\nJohn Agius\nPharmacist\nMultigas`;
+}
+
+const SUBJECT = "Renewed medical oxygen prescription required";
+
+function composeUrl(g){
+  const to = encodeURIComponent(g.email);
+  const subject = encodeURIComponent(SUBJECT);
+  const bodyEnc = encodeURIComponent(body(g.patients));
+  return `https://outlook.office.com/mail/deeplink/compose?to=${to}&subject=${subject}&body=${bodyEnc}`;
+}
+
+function open1(g){
+  const w = window.open(composeUrl(g), "_blank");
+  if(w){           // only record if the tab actually opened (not blocked)
+    markSent(g.email);
+  } else {
+    blocked++;
+  }
+  render();
+}
+let blocked = 0;
+
+function visible(){
+  const q = document.getElementById("search").value.trim().toLowerCase();
+  if(!q) return DATA;
+  return DATA.filter(g =>
+    g.email.toLowerCase().includes(q) ||
+    g.patients.some(p => p.name.toLowerCase().includes(q) || p.cust.toLowerCase().includes(q)));
+}
+
+function openAll(){
+  blocked = 0;
+  const todo = visible().filter(g => !sentRecently(g.email));
+  todo.forEach((g,i)=> setTimeout(()=>{
+    open1(g);
+    if(i === todo.length-1) setTimeout(reportBlocked, 200);
+  }, i*600));
+}
+function openBatch(n){
+  blocked = 0;
+  const todo = visible().filter(g=>!sentRecently(g.email)).slice(0,n);
+  todo.forEach((g,i)=> setTimeout(()=>{
+    open1(g);
+    if(i === todo.length-1) setTimeout(reportBlocked, 200);
+  }, i*600));
+}
+function reportBlocked(){
+  if(blocked > 0){
+    alert(blocked + " tab(s) were blocked by the browser and were NOT marked as sent. "
+      + "Allow pop-ups for this page, then click \"Open next 10\" to continue with the rest.");
+  }
+}
+function resetSent(){
+  if(confirm("Clear the record of who's been emailed? This forgets the last 24h of sends.")){
+    store = {}; saveStore(store); render();
+  }
+}
+
+function render(){
+  let rows = visible().slice();
+  // Un-sent (or expired) first, then recently-sent
+  rows.sort((a,b)=> (sentRecently(a.email)?1:0) - (sentRecently(b.email)?1:0));
+  const remaining = rows.filter(g=>!sentRecently(g.email)).length;
+  document.getElementById("cnt").textContent = remaining;
+  document.getElementById("pcnt").textContent = rows.reduce((a,g)=>a+g.patients.length,0);
+  document.getElementById("sentCnt").textContent = sentCount();
+  const tb = document.getElementById("rows");
+  tb.innerHTML = "";
+  for(const g of rows){
+    const tr = document.createElement("tr");
+    const done = sentRecently(g.email);
+    if(done) tr.className = "sent";
+    const badge = g.patients.length>1 ? `<span class="badge">${g.patients.length} patients</span>` : "";
+    const plist = g.patients.map(p=>`<span class="cust">${p.cust}</span> ${p.name}`).join("<br>");
+    const label = done ? `Sent ${ago(g.email)}` : "Send";
+    tr.innerHTML = `<td><div class="email">${g.email}${badge}</div><div class="patients">${plist}</div></td>
+      <td><button class="send ${done?'done':''}">${label}</button></td>`;
+    tr.querySelector("button").onclick = ()=>open1(g);
+    tb.appendChild(tr);
+  }
+}
+render();
+</script>
+</body>
+</html>

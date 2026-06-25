@@ -1,0 +1,7 @@
+Open BC
+ALT + Q
+Prescription list
+Sort by customer number
+Go to console
+Top left, find top in dropdown. Select Multigas Production
+Paste the code in the console

@@ -1,0 +1,576 @@
+(async function collectExpiredPrescriptionAccounts() {
+    "use strict";
+
+    const configuration = {
+        cutoffDateText: "14/05/2026",
+        skipClosedAccounts: true,
+        scrollDelayMilliseconds: 350,
+        maximumScrollSteps: 2000,
+        scrollAmountRatio: 0.55,
+        logEachStep: false,
+        downloadCsvOnFinish: true,
+        // Top row's End Date year must be >= this. Older customers are considered inactive.
+        minimumTopRowYear: 2026,
+        // A prescription counts as a "temporary approval" when its Note says so
+        // OR when its open period (Start Date -> End Date) is shorter than one month
+        // (this catches temps that have an EMPTY note).
+        // Leave temporaryMaxDays null to use "less than one calendar month".
+        // Set it to a number (e.g. 25) to use a fixed day-count threshold instead.
+        temporaryMaxDays: null
+    };
+
+    const customerNumberRegex = /\b[A-Z]\d{5}\b/;
+    const dateFindRegex = /\b([0-3]?\d)\/([01]?\d)\/((?:19|20)\d{2})\b/g;
+    const singleDateRegex = /^\s*([0-3]?\d)\/([01]?\d)\/((?:19|20)\d{2})\s*$/;
+    const temporaryRegex = /\b(temp|temporary|temporarily)\b/i;
+
+    function normaliseText(value) {
+        return String(value || "")
+            .replace(/\u00a0/g, " ")
+            .replace(/[\u200B-\u200D\uFEFF]/g, "")
+            .replace(/[ \t]+/g, " ")
+            .replace(/\n\s*/g, "\n")
+            .trim();
+    }
+    function oneLineText(value) {
+        return normaliseText(value).replace(/\s*\n\s*/g, " ").replace(/\s+/g, " ").trim();
+    }
+    function parseDDMMYYYY(value) {
+        const m = String(value || "").match(singleDateRegex);
+        if (!m) return null;
+        const day = +m[1], month = +m[2], year = +m[3];
+        const d = new Date(Date.UTC(year, month - 1, day));
+        if (d.getUTCFullYear() !== year || d.getUTCMonth() !== month - 1 || d.getUTCDate() !== day) return null;
+        return d;
+    }
+    function addOneMonth(date) {
+        const d = new Date(date.getTime());
+        const targetDay = d.getUTCDate();
+        d.setUTCMonth(d.getUTCMonth() + 1);
+        // If the next month is shorter, setUTCMonth rolls over; clamp to its last day.
+        if (d.getUTCDate() < targetDay) d.setUTCDate(0);
+        return d;
+    }
+    function isShortOpenPeriod(startMs, endMs) {
+        if (startMs == null || endMs == null) return false;
+        if (endMs < startMs) return false; // ignore inverted / garbage ranges
+        if (configuration.temporaryMaxDays != null) {
+            return (endMs - startMs) / 86400000 < configuration.temporaryMaxDays;
+        }
+        // strictly less than one calendar month
+        return endMs < addOneMonth(new Date(startMs)).getTime();
+    }
+    function isTemporaryRow(r) {
+        if (temporaryRegex.test(r.note || "")) return true;       // note says temp
+        return isShortOpenPeriod(r.startDateTime, r.endDateTime); // OR short period (empty note ok)
+    }
+    function temporaryReasonLabel(r) {
+        const hasDuration = r.startDateTime != null && r.endDateTime != null && r.endDateTime >= r.startDateTime;
+        const days = hasDuration ? Math.round((r.endDateTime - r.startDateTime) / 86400000) : null;
+        const noteTemp = !!(r.note && temporaryRegex.test(r.note));
+        if (noteTemp) return days != null ? `${r.note} (${days}d)` : r.note;
+        if (days != null) return r.note ? `${r.note} — short ${days}d` : `(no note, short ${days}d)`;
+        return r.note || "(temp)";
+    }
+    function getDateTexts(value) {
+        const m = String(value || "").match(dateFindRegex);
+        return Array.isArray(m) ? m : [];
+    }
+    function getElementText(el) {
+        if (!el) return "";
+        return normaliseText(el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title") || "");
+    }
+    function isElementVisible(el) {
+        if (!el || el.nodeType !== 1) return false;
+        const r = el.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) return false;
+        const s = window.getComputedStyle(el);
+        if (s.display === "none" || s.visibility === "hidden" || Number(s.opacity) === 0) return false;
+        return true;
+    }
+    function getCellElements(rowElement) {
+        if (!rowElement) return [];
+        let cells = Array.from(rowElement.querySelectorAll('[role="gridcell"], [role="cell"], td, th'));
+        if (cells.length === 0) cells = Array.from(rowElement.children || []);
+        return cells.filter(isElementVisible).sort((a, b) =>
+            a.getBoundingClientRect().left - b.getBoundingClientRect().left);
+    }
+    function getVisiblePotentialRowElements() {
+        return Array.from(document.querySelectorAll('[role="row"], tr')).filter(row => {
+            if (!isElementVisible(row)) return false;
+            const t = oneLineText(getElementText(row));
+            if (!customerNumberRegex.test(t)) return false;
+            if (getDateTexts(t).length === 0) return false;
+            if (t.length > 2000) return false;
+            return true;
+        });
+    }
+    function findLabelCenter(labelRegex) {
+        const preferred = Array.from(document.querySelectorAll('[role="columnheader"], th')).filter(isElementVisible);
+        for (const el of preferred) {
+            const t = oneLineText(getElementText(el)).replace(/[↑↓]/g, "").trim();
+            if (labelRegex.test(t)) {
+                const r = el.getBoundingClientRect();
+                return r.left + r.width / 2;
+            }
+        }
+        const fallback = Array.from(document.querySelectorAll("body *")).filter(isElementVisible);
+        for (const el of fallback) {
+            const t = oneLineText(getElementText(el)).replace(/[↑↓]/g, "").trim();
+            if (labelRegex.test(t)) {
+                const r = el.getBoundingClientRect();
+                if (r.width > 10 && r.height > 5) return r.left + r.width / 2;
+            }
+        }
+        return null;
+    }
+
+    let cachedColumnCenters = null, cachedColumnCentersTs = 0;
+    function getColumnCenters() {
+        const now = Date.now();
+        if (cachedColumnCenters && now - cachedColumnCentersTs < 1500) return cachedColumnCenters;
+        cachedColumnCenters = {
+            customerNumberCenter:   findLabelCenter(/^Customer\s*No\.?$/i),
+            customerNameCenter:     findLabelCenter(/^Customer\s*Name$/i),
+            noteCenter:             findLabelCenter(/^Note$/i),
+            startDateCenter:        findLabelCenter(/^Start\s*Date$/i),
+            endDateCenter:          findLabelCenter(/^End\s*Date$/i),
+            emailSentCenter:        findLabelCenter(/^Email\s*Sent$/i),
+            expiryWarningCenter:    findLabelCenter(/^Prescription\s*Expiry\s*Warning\s*Date$/i)
+        };
+        cachedColumnCentersTs = now;
+        return cachedColumnCenters;
+    }
+
+    function findCellNearestColumnCenter(cells, columnCenter) {
+        if (columnCenter == null || !Array.isArray(cells) || cells.length === 0) return null;
+        let best = null, bestDist = Infinity;
+        for (const c of cells) {
+            const r = c.getBoundingClientRect();
+            const d = Math.abs((r.left + r.width / 2) - columnCenter);
+            if (d < bestDist) { bestDist = d; best = c; }
+        }
+        return best;
+    }
+    function getCellTextNearestColumnCenter(cells, columnCenter) {
+        return getElementText(findCellNearestColumnCenter(cells, columnCenter));
+    }
+
+    function detectCheckboxState(cell) {
+        if (!cell) return "";
+        const checkedTrue = cell.querySelector('[aria-checked="true"]');
+        if (checkedTrue) return "Yes";
+        const checkedFalse = cell.querySelector('[aria-checked="false"]');
+        if (checkedFalse) return "No";
+        if (cell.getAttribute("role") === "checkbox") {
+            const ac = cell.getAttribute("aria-checked");
+            if (ac === "true") return "Yes";
+            if (ac === "false") return "No";
+        }
+        const input = cell.querySelector('input[type="checkbox"]');
+        if (input) return input.checked ? "Yes" : "No";
+        const txt = (cell.innerText || cell.textContent || "").trim();
+        if (/[✓✔☑]/.test(txt)) return "Yes";
+        if (/[✗✘☐]/.test(txt)) return "No";
+        if (cell.querySelector('[class*="checked" i], [class*="ischecked" i]')) return "Yes";
+        return "";
+    }
+
+    function extractCustomerNameFallback(cells, customerNumber, rowText) {
+        const cellTexts = cells.map(getElementText).map(oneLineText).filter(t => t.length > 0);
+        const idx = cellTexts.findIndex(t => t.includes(customerNumber));
+        if (idx >= 0) {
+            for (let i = idx + 1; i < cellTexts.length; i++) {
+                const c = cellTexts[i];
+                if (!c) continue;
+                if (["⋮", "…", ".", "..", "..."].includes(c)) continue;
+                if (customerNumberRegex.test(c)) continue;
+                if (singleDateRegex.test(c)) continue;
+                if (/^O2MMED$/i.test(c)) continue;
+                if (/^MG\s*D$/i.test(c)) continue;
+                if (/^(Default Prescription for Onboarding|Renewal|Temporary|Temporarily Approved)$/i.test(c)) continue;
+                if (/[A-Za-z]/.test(c)) return c;
+            }
+        }
+        const flat = oneLineText(rowText);
+        const pat = new RegExp("\\b" + customerNumber + "\\b\\s+(.+?)\\s+O2MMED\\b", "i");
+        const m = flat.match(pat);
+        if (m && m[1]) return oneLineText(m[1]);
+        return "";
+    }
+
+    function extractPrescriptionRow(rowElement) {
+        const rowText = getElementText(rowElement);
+        const flat = oneLineText(rowText);
+        if (!customerNumberRegex.test(flat)) return null;
+
+        const cells = getCellElements(rowElement);
+        const cc = getColumnCenters();
+
+        let customerNumber = "";
+        const custCellText = getCellTextNearestColumnCenter(cells, cc.customerNumberCenter);
+        const custCellMatch = custCellText.match(customerNumberRegex);
+        if (custCellMatch) customerNumber = custCellMatch[0];
+        else {
+            const rowMatch = flat.match(customerNumberRegex);
+            if (rowMatch) customerNumber = rowMatch[0];
+        }
+        if (!customerNumber) return null;
+
+        let customerName = "";
+        const nameCellText = getCellTextNearestColumnCenter(cells, cc.customerNameCenter);
+        if (nameCellText && !customerNumberRegex.test(nameCellText)) customerName = oneLineText(nameCellText);
+        if (!customerName) customerName = extractCustomerNameFallback(cells, customerNumber, rowText);
+
+        const note = oneLineText(getCellTextNearestColumnCenter(cells, cc.noteCenter));
+
+        const startDateRaw = getCellTextNearestColumnCenter(cells, cc.startDateCenter);
+        const startDates = getDateTexts(startDateRaw);
+        const startDateText = startDates.length > 0 ? startDates[0] : "";
+        const startDate = parseDDMMYYYY(startDateText);
+
+        const endDateRaw = getCellTextNearestColumnCenter(cells, cc.endDateCenter);
+        const endDates = getDateTexts(endDateRaw);
+        let endDateText = endDates.length > 0 ? endDates[0] : "";
+        if (!endDateText) {
+            const rowDates = getDateTexts(flat);
+            if (rowDates.length >= 2) endDateText = rowDates[1];
+            else if (rowDates.length === 1) endDateText = rowDates[0];
+        }
+        const endDate = parseDDMMYYYY(endDateText);
+        if (!endDate) return null;
+
+        const emailSentCell = findCellNearestColumnCenter(cells, cc.emailSentCenter);
+        const emailSent = detectCheckboxState(emailSentCell);
+
+        const warnRaw = getCellTextNearestColumnCenter(cells, cc.expiryWarningCenter);
+        const warnDates = getDateTexts(warnRaw);
+        const expiryWarningText = warnDates.length > 0 ? warnDates[0] : "";
+
+        return {
+            customerNumber,
+            customerName,
+            note,
+            startDateText,
+            startDateTime: startDate ? startDate.getTime() : null,
+            endDateText,
+            endDateTime: endDate.getTime(),
+            emailSent,
+            expiryWarningText,
+            rawRowText: flat,
+            isClosed: /\(CLOSED\)/i.test(customerName) || /\(CLOSED\)/i.test(flat)
+        };
+    }
+
+    function findScrollableAncestor(el) {
+        let cur = el ? el.parentElement : null;
+        const cands = [];
+        while (cur && cur !== document.documentElement) {
+            if (isElementVisible(cur) && cur.scrollHeight > cur.clientHeight + 20 && cur.clientHeight > 150 && cur.clientWidth > 300) cands.push(cur);
+            cur = cur.parentElement;
+        }
+        return cands[0] || document.scrollingElement || document.documentElement || document.body;
+    }
+    function getScrollTop(s) {
+        if (s === document.scrollingElement || s === document.documentElement || s === document.body)
+            return window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0;
+        return s.scrollTop;
+    }
+    function setScrollTop(s, v) {
+        if (s === document.scrollingElement || s === document.documentElement || s === document.body) {
+            window.scrollTo(0, v); document.documentElement.scrollTop = v; document.body.scrollTop = v; return;
+        }
+        s.scrollTop = v;
+        s.dispatchEvent(new Event("scroll", { bubbles: true }));
+    }
+    function getScrollHeight(s) {
+        if (s === document.scrollingElement || s === document.documentElement || s === document.body)
+            return Math.max(document.body.scrollHeight, document.documentElement.scrollHeight, document.body.offsetHeight, document.documentElement.offsetHeight);
+        return s.scrollHeight;
+    }
+    function getClientHeight(s) {
+        if (s === document.scrollingElement || s === document.documentElement || s === document.body)
+            return window.innerHeight || document.documentElement.clientHeight || document.body.clientHeight;
+        return s.clientHeight;
+    }
+    function wait(ms) { return new Promise(r => window.setTimeout(r, ms)); }
+
+    function makeRowKey(r) {
+        return [r.customerNumber, r.customerName, r.endDateText, r.startDateText, r.rawRowText].join("\t");
+    }
+
+    function escapeTsv(v) {
+        return String(v == null ? "" : v).replace(/\t/g, " ").replace(/\r/g, " ").replace(/\n/g, " ").trim();
+    }
+    function escapeCsv(v) {
+        const s = String(v == null ? "" : v);
+        if (/[",\r\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+        return s;
+    }
+
+    async function copyTextToClipboard(text) {
+        try { if (typeof copy === "function") { copy(text); return true; } } catch (e) {}
+        try { if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); return true; } } catch (e) {}
+        try {
+            const ta = document.createElement("textarea");
+            ta.value = text; ta.style.position = "fixed"; ta.style.left = "-9999px"; ta.style.top = "-9999px";
+            document.body.appendChild(ta); ta.focus(); ta.select();
+            const ok = document.execCommand("copy");
+            document.body.removeChild(ta);
+            return ok;
+        } catch (e) { return false; }
+    }
+
+    function downloadAsFile(text, filename, mimeType) {
+        try {
+            const blob = new Blob([text], { type: mimeType });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url; a.download = filename;
+            document.body.appendChild(a); a.click();
+            document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(url), 1500);
+            return true;
+        } catch (e) { console.error("Download failed:", e); return false; }
+    }
+
+    function collectVisibleRowsIntoMap(map) {
+        let added = 0;
+        for (const row of getVisiblePotentialRowElements()) {
+            const ex = extractPrescriptionRow(row);
+            if (!ex) continue;
+            const k = makeRowKey(ex);
+            if (!map.has(k)) { map.set(k, ex); added++; }
+        }
+        return added;
+    }
+
+    console.clear();
+    console.log("Scanning Prescription List. Do not click inside the page until this finishes.");
+
+    const cutoffDate = parseDDMMYYYY(configuration.cutoffDateText);
+    if (!cutoffDate) throw new Error("Invalid cutoff date: " + configuration.cutoffDateText);
+
+    const initialRows = getVisiblePotentialRowElements();
+    if (initialRows.length === 0) {
+        console.error("No prescription rows detected. Make sure the grid is visible.");
+        return;
+    }
+
+    const scrollEl = findScrollableAncestor(initialRows[0]);
+    console.log("Detected scroll element:", scrollEl);
+
+    setScrollTop(scrollEl, 0);
+    await wait(configuration.scrollDelayMilliseconds * 2);
+
+    const collected = new Map();
+    let sameCount = 0;
+
+    for (let step = 0; step < configuration.maximumScrollSteps; step++) {
+        const added = collectVisibleRowsIntoMap(collected);
+        const cur = getScrollTop(scrollEl);
+        const max = Math.max(0, getScrollHeight(scrollEl) - getClientHeight(scrollEl));
+        const amt = Math.max(120, Math.floor(getClientHeight(scrollEl) * configuration.scrollAmountRatio));
+        const next = Math.min(max, cur + amt);
+        if (configuration.logEachStep) console.log("step", step+1, "added", added, "total", collected.size, "scroll", cur, "/", max);
+        if (next <= cur + 1) sameCount++;
+        else {
+            setScrollTop(scrollEl, next);
+            await wait(configuration.scrollDelayMilliseconds);
+            if (Math.abs(getScrollTop(scrollEl) - cur) <= 1) sameCount++;
+            else sameCount = 0;
+        }
+        if (sameCount >= 4) break;
+    }
+    await wait(configuration.scrollDelayMilliseconds);
+    collectVisibleRowsIntoMap(collected);
+
+    const all = Array.from(collected.values());
+
+    // Identify closed accounts (any row marking the customer as closed)
+    const closedAccts = new Set();
+    for (const r of all) if (r.isClosed) closedAccts.add(r.customerNumber);
+
+    // Group every non-closed row by customer
+    const rowsByCustomer = new Map();
+    for (const r of all) {
+        if (configuration.skipClosedAccounts && closedAccts.has(r.customerNumber)) continue;
+        if (!rowsByCustomer.has(r.customerNumber)) rowsByCustomer.set(r.customerNumber, []);
+        rowsByCustomer.get(r.customerNumber).push(r);
+    }
+
+    const cutoffMs = cutoffDate.getTime();
+
+    const customerSummaries = [];
+    for (const [, rows] of rowsByCustomer) {
+        // Sort rows newest-first by End Date — independent of UI sort order
+        rows.sort((a, b) => b.endDateTime - a.endDateTime);
+        const topRow = rows[0];
+
+        const topRowYear = new Date(topRow.endDateTime).getUTCFullYear();
+        const topRowExpired = topRow.endDateTime < cutoffMs;
+        const topRowHasTemp = isTemporaryRow(topRow); // note OR sub-1-month period (empty note ok)
+
+        // Count the run of consecutive temporary approvals that TOUCHES the
+        // current (top) prescription.
+        //  - If the top row is itself a temp, the run starts at the top (inclusive).
+        //  - If the top row is expired but NOT a temp, count the temps sitting
+        //    immediately beneath it (i.e. the temps touching the current expired row).
+        const runStartIndex = topRowHasTemp ? 0 : 1;
+        let consecutiveTempsCount = 0;
+        const consecutiveTempsTrail = []; // newest -> oldest within the run
+        for (let i = runStartIndex; i < rows.length; i++) {
+            if (!isTemporaryRow(rows[i])) break; // first non-temp breaks the chain
+            consecutiveTempsCount++;
+            const r = rows[i];
+            consecutiveTempsTrail.push(`${r.startDateText}→${r.endDateText}: ${temporaryReasonLabel(r)}`);
+        }
+        // Reverse so the trail reads oldest -> newest, ending at the current run
+        consecutiveTempsTrail.reverse();
+
+        // All-time temp count (across the customer's full history) for context
+        const totalTempCount = rows.reduce(
+            (acc, r) => acc + (isTemporaryRow(r) ? 1 : 0),
+            0
+        );
+
+        customerSummaries.push({
+            ...topRow,
+            topRowYear,
+            topRowExpired,
+            topRowHasTemp,
+            consecutiveTempsCount,
+            consecutiveTempsTrailJoined: consecutiveTempsTrail.join(" → "),
+            totalTempCount,
+            totalRowsForCustomer: rows.length
+        });
+    }
+
+    // ---- Filter ----
+    // Qualify if: top row is from minimumTopRowYear or later AND (expired OR temp).
+    // "temp" now = Note says temp OR open period < 1 month (empty notes included).
+    // For qualifying customers, the consecutive-temp count is the abuse signal.
+    const flagged = [];
+    const skippedTopRowTooOld = [];
+    const skippedActiveRegular = [];
+
+    for (const c of customerSummaries) {
+        if (c.topRowYear < configuration.minimumTopRowYear) {
+            skippedTopRowTooOld.push(c);
+            continue;
+        }
+        if (!c.topRowExpired && !c.topRowHasTemp) {
+            skippedActiveRegular.push(c);
+            continue;
+        }
+
+        let currentState;
+        if (c.topRowExpired && c.topRowHasTemp) currentState = "Expired Temp";
+        else if (c.topRowExpired) currentState = "Expired";
+        else currentState = "Active Temp";
+
+        flagged.push({ ...c, currentState });
+    }
+
+    // Sort: most consecutive temps first (worst abusers float up),
+    // then total temps as tie-breaker, then alphabetical name.
+    flagged.sort((a, b) => {
+        if (b.consecutiveTempsCount !== a.consecutiveTempsCount) return b.consecutiveTempsCount - a.consecutiveTempsCount;
+        if (b.totalTempCount !== a.totalTempCount) return b.totalTempCount - a.totalTempCount;
+        return String(a.customerName).localeCompare(String(b.customerName));
+    });
+
+    const headers = [
+        "Customer No.", "Customer Name",
+        "Current State", "Consecutive Temps", "Total Temps", "Total Rows",
+        "Top Row Note", "Top Row Start", "Top Row End",
+        "Email Sent", "Prescription Expiry Warning Date",
+        "Consecutive Temp Trail", "Decision"
+    ];
+    const rowToArr = r => [
+        r.customerNumber, r.customerName,
+        r.currentState, r.consecutiveTempsCount, r.totalTempCount, r.totalRowsForCustomer,
+        r.note, r.startDateText, r.endDateText,
+        r.emailSent, r.expiryWarningText,
+        r.consecutiveTempsTrailJoined,
+        `${r.currentState}: ${r.consecutiveTempsCount} consecutive temp approval(s) in place (current ends ${r.endDateText})`
+    ];
+
+    const tsv = [headers.map(escapeTsv).join("\t")]
+        .concat(flagged.map(r => rowToArr(r).map(escapeTsv).join("\t")))
+        .join("\n");
+    const csv = [headers.map(escapeCsv).join(",")]
+        .concat(flagged.map(r => rowToArr(r).map(escapeCsv).join(",")))
+        .join("\n");
+
+    const copied = await copyTextToClipboard(tsv);
+
+    const fileStamp = new Date().toISOString().slice(0, 10);
+    const csvFilename = `prescription-temp-watchlist-${fileStamp}.csv`;
+    const tsvFilename = `prescription-temp-watchlist-${fileStamp}.tsv`;
+
+    let downloaded = false;
+    if (configuration.downloadCsvOnFinish) {
+        downloaded = downloadAsFile(csv, csvFilename, "text/csv;charset=utf-8");
+    }
+
+    // Sub-buckets by current state for inspection
+    const flaggedByState = {
+        expiredTemp: flagged.filter(r => r.currentState === "Expired Temp"),
+        activeTemp: flagged.filter(r => r.currentState === "Active Temp"),
+        expiredRegular: flagged.filter(r => r.currentState === "Expired")
+    };
+
+    window.prescriptionExpiryScan = {
+        cutoffDateText: configuration.cutoffDateText,
+        minimumTopRowYear: configuration.minimumTopRowYear,
+        temporaryMaxDays: configuration.temporaryMaxDays,
+        totalRowsCollected: all.length,
+        totalCustomersAfterClosedSkipped: customerSummaries.length,
+        totalClosedAccountsSkipped: closedAccts.size,
+        totalFlagged: flagged.length,
+        totalFlaggedExpiredTemp: flaggedByState.expiredTemp.length,
+        totalFlaggedActiveTemp: flaggedByState.activeTemp.length,
+        totalFlaggedExpiredRegular: flaggedByState.expiredRegular.length,
+        totalSkippedTopRowTooOld: skippedTopRowTooOld.length,
+        totalSkippedActiveRegular: skippedActiveRegular.length,
+        matchingRows: flagged,
+        flaggedByState,
+        skippedTopRowTooOld,
+        skippedActiveRegular,
+        allCollectedRows: all,
+        expiredTsv: tsv,
+        expiredCsv: csv,
+        downloadCsv: () => downloadAsFile(csv, csvFilename, "text/csv;charset=utf-8"),
+        downloadTsv: () => downloadAsFile(tsv, tsvFilename, "text/tab-separated-values;charset=utf-8")
+    };
+
+    console.log("Finished.");
+    console.log("Rows collected:", all.length);
+    console.log("Customers evaluated (after closed skipped):", customerSummaries.length);
+    console.log("Closed accounts skipped:", closedAccts.size);
+    console.log("Temp rule:", configuration.temporaryMaxDays != null
+        ? `open period < ${configuration.temporaryMaxDays} days (or Note says temp)`
+        : "open period < 1 calendar month (or Note says temp)");
+    console.log("Flagged total:", flagged.length);
+    console.log("  - Expired Temp (top row expired & is a temp):", flaggedByState.expiredTemp.length);
+    console.log("  - Active Temp (top row still valid but is a temp):", flaggedByState.activeTemp.length);
+    console.log("  - Expired (top row expired, not a temp):", flaggedByState.expiredRegular.length);
+    console.log("Un-flagged diagnostics:");
+    console.log(`  - top row year < ${configuration.minimumTopRowYear}:`, skippedTopRowTooOld.length);
+    console.log("  - top row active and regular (no action needed):", skippedActiveRegular.length);
+    console.log("TSV copied to clipboard:", copied);
+    console.log("CSV auto-downloaded:", downloaded, "→", csvFilename);
+    console.log("Re-download anytime: prescriptionExpiryScan.downloadCsv() or .downloadTsv()");
+
+    console.table(flagged.map(r => ({
+        "Customer No.": r.customerNumber,
+        "Customer Name": r.customerName,
+        "State": r.currentState,
+        "Consec Temps": r.consecutiveTempsCount,
+        "Total Temps": r.totalTempCount,
+        "Total Rows": r.totalRowsForCustomer,
+        "Top End": r.endDateText,
+        "Top Note": r.note
+    })));
+})();
