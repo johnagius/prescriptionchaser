@@ -60,6 +60,18 @@ const res = await page.evaluate(() => ({
 }));
 console.log('RESULTS:', JSON.stringify(res, null, 2));
 
+// 4b) compliance report: deceased with cylinder activity in last 30 days
+const report = await page.evaluate(() => ({
+  visible: !document.getElementById('deceasedReport').classList.contains('hidden'),
+  count: (DIAG.deceasedActive || []).length,
+  deceasedAmongSwappers: DIAG.deceasedAmongSwappers,
+  swapping: DIAG.swapping,
+  csvHead: deceasedActiveCsv().split('\n')[0],
+  csvLines: deceasedActiveCsv().split('\n').length,
+  sample: (DIAG.deceasedActive || []).slice(0, 3),
+}));
+console.log('DECEASED-ACTIVE REPORT:', JSON.stringify(report, null, 2));
+
 // 5) sorting: click "Consec. Temps" header twice, ensure order changes
 await page.click('th[data-k="relConsec"]');
 const firstAsc = await page.evaluate(() => RESULTS[0].relConsec);

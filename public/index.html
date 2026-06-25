@@ -21,6 +21,7 @@
   .step{display:flex;align-items:baseline;gap:10px;margin-bottom:14px}
   .step .n{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;flex:none;
     background:var(--accent);color:#fff;border-radius:50%;font-size:13px;font-weight:700}
+  .step .n.bad{background:var(--bad)}
   .step h2{margin:0}
   button{cursor:pointer;border:none;border-radius:8px;padding:9px 16px;font-size:14px;font-weight:600}
   .primary{background:var(--accent);color:#fff}
@@ -100,6 +101,14 @@
   .send.none{background:#2a343f;color:#5c6773;cursor:not-allowed}
   .trail{white-space:normal;color:var(--muted);font-size:12px;max-width:340px}
   details summary{cursor:pointer;color:var(--accent2);font-size:12px}
+  .alert{background:#241519;border:1px solid var(--bad);border-left:3px solid var(--bad);
+    border-radius:8px;padding:12px 14px;margin:0 0 16px;font-size:13px;color:var(--ink);line-height:1.5}
+  .alert b{color:var(--bad)}
+  .alert.warn{background:#221c10;border-color:var(--warn);border-left-color:var(--warn)}
+  .alert.warn b{color:var(--warn)}
+  .alert summary{cursor:pointer;color:var(--accent);font-weight:600}
+  .diaglist{margin-top:8px;max-height:220px;overflow:auto;white-space:pre;font-size:12px;color:var(--muted);
+    font-family:ui-monospace,Menlo,monospace}
   .empty{padding:40px;text-align:center;color:var(--muted)}
   .hidden{display:none}
   .footnote{color:var(--muted);font-size:12px;margin-top:18px;text-align:center}
@@ -170,7 +179,7 @@
   <!-- STEP 3 -->
   <div class="card">
     <div class="step"><span class="n">3</span><h2>Deceased patients list <span style="font-size:12px;color:var(--muted);text-transform:none;letter-spacing:0;font-weight:400">&mdash; optional, encouraged</span></h2></div>
-    <p class="sub" style="margin-bottom:14px">These patients are removed from the results &mdash; they're irrelevant to chasing. Accepts the <b>.xlsx</b> passed-away export or any CSV containing customer numbers.</p>
+    <p class="sub" style="margin-bottom:14px">These patients are removed from the chase list. Any of them with cylinder movements in the last 30 days are pulled into a separate <b style="color:var(--bad)">flag-to-company</b> report. Accepts the <b>.xlsx</b> passed-away export or any CSV containing customer numbers.</p>
     <div class="drop" id="dropDec" style="padding:18px">
       <input type="file" id="decInput" accept=".xlsx,.csv,.tsv,.txt">
       <div><b>Drop the deceased list here</b> &nbsp;or&nbsp; <span style="text-decoration:underline">click to choose</span></div>
@@ -180,6 +189,9 @@
     </div>
     <div class="err" id="decErr"></div>
   </div>
+
+  <!-- COMPLIANCE REPORT: deceased patients with recent cylinder activity -->
+  <div class="card hidden" id="deceasedReport" style="border-color:var(--bad)"></div>
 
   <!-- STEP 4: RESULTS -->
   <div class="card" id="resultCard">
@@ -1571,7 +1583,7 @@ function pick(obj, headers, candidates){
   }
   return "";
 }
-const CUST_RE=/[A-Z]\d{3,6}/g;
+const CUST_RE=/\b[A-Z]\d{5}\b/g;   // canonical customer-number token, e.g. D01588
 function custNo(s){ const m=String(s||"").toUpperCase().match(/[A-Z]\d{5}/); return m?m[0]:String(s||"").trim().toUpperCase(); }
 
 /* ---------- dataset detection ---------- */
@@ -1776,6 +1788,7 @@ wireDrop("dropDec","decInput", files=>handleDeceased(files[0]));
    ============================================================================ */
 let RESULTS=[];          // one row per patient to chase
 let GROUPS=new Map();    // email(lowercase) -> {email, patients:[{cust,name}]}
+let DIAG={};             // computation diagnostics (counts + removed-as-deceased)
 
 function isTempState(state){ return /temp/i.test(state||""); }
 
@@ -1789,12 +1802,34 @@ function compute(){
   const cyl = DATA.cylinders;
   const contacts = DATA.contacts || new Map();
 
-  let removedDeceased=0, removedNoSwap=0;
-  RESULTS = DATA.watchlist.filter(r=>{
-    if(deceased.has(r.cust)){ removedDeceased++; return false; }
-    if(!cyl.has(r.cust)){ removedNoSwap++; return false; }
-    return true;
-  }).map(r=>{
+  const byCust = new Map(DATA.watchlist.map(r=>[r.cust, r]));
+
+  // Independent signals (order-free): a customer is dropped if they're on the
+  // deceased list OR have had no cylinder swap in the last 30 days.
+  const swappers = DATA.watchlist.filter(r=>cyl.has(r.cust));
+  const removedDeceasedRows = swappers.filter(r=>deceased.has(r.cust)); // flagged + swapping yet "deceased"
+  const noSwapCount = DATA.watchlist.length - swappers.length;
+
+  // COMPLIANCE REPORT — every deceased customer with cylinder movement in the
+  // last 30 days, regardless of prescription state. These should be flagged to
+  // the company (cylinders supplied to / not recovered from deceased patients).
+  const deceasedActive = [...cyl.keys()]
+    .filter(c=>deceased.has(c))
+    .map(c=>{
+      const w=byCust.get(c)||{}, ct=contacts.get(c)||{};
+      return {
+        cust:c,
+        name: w.name || ct.name || "",
+        state: w.state || "",
+        cyl: cyl.get(c)||0,
+        topEnd: w.topEnd || "",
+        consec: (w.consec!=null? w.consec : ""),
+        phone: ct.mobile || ct.phone || ""
+      };
+    })
+    .sort((a,b)=> b.cyl - a.cyl || String(a.cust).localeCompare(b.cust));
+
+  RESULTS = swappers.filter(r=>!deceased.has(r.cust)).map(r=>{
     const c=contacts.get(r.cust)||{};
     const temp=isTempState(r.state);
     return {
@@ -1808,6 +1843,15 @@ function compute(){
     };
   });
 
+  DIAG = {
+    flagged: DATA.watchlist.length,
+    swapping: swappers.length,
+    noSwap: noSwapCount,
+    deceasedAmongSwappers: removedDeceasedRows.length,
+    removedDeceasedRows,
+    deceasedActive
+  };
+
   // build email groups (one combined email per recipient)
   GROUPS=new Map();
   for(const r of RESULTS){
@@ -1817,11 +1861,12 @@ function compute(){
     GROUPS.get(key).patients.push({cust:r.cust, name:r.name||r.contactName});
   }
 
-  renderStats(removedDeceased, removedNoSwap);
+  renderStats();
   applySort(); render();
 }
 
-function renderStats(removedDeceased, removedNoSwap){
+function renderStats(){
+  const d=DIAG;
   const tempCount=RESULTS.filter(r=>isTempState(r.state)).length;
   const expiredCount=RESULTS.filter(r=>!isTempState(r.state)).length;
   const noEmail=RESULTS.filter(r=>!r.email).length;
@@ -1831,11 +1876,62 @@ function renderStats(removedDeceased, removedNoSwap){
     {n:expiredCount, l:"expired (no temp)", c:""},
     {n:GROUPS.size, l:"recipient emails", c:"ok"},
     {n:noEmail, l:"missing an email", c: noEmail?"warn":""},
-    {n:removedNoSwap, l:"dropped · no swap in 30d", c:""},
-    {n:removedDeceased, l:"dropped · deceased", c:""}
+    {n:d.noSwap, l:"dropped · no swap in 30d", c:""},
+    {n:d.deceasedAmongSwappers, l:"dropped · deceased", c: d.deceasedAmongSwappers?"warn":""}
   ];
   document.getElementById("stats").innerHTML=stats.map(s=>
     '<div class="s '+s.c+'"><b>'+s.n+'</b>'+s.l+'</div>').join("");
+
+  renderDeceasedReport();
+}
+
+/* COMPLIANCE REPORT — deceased customers with cylinder movement in the last 30
+   days. Always shown when present: cylinders being supplied to / not recovered
+   from deceased patients must be flagged to the company. */
+function renderDeceasedReport(){
+  const box=document.getElementById("deceasedReport");
+  const d=DIAG, rows=(d.deceasedActive||[]);
+  if(!DATA.deceased || !rows.length){ box.classList.add("hidden"); box.innerHTML=""; return; }
+  box.classList.remove("hidden");
+
+  // A suspiciously large overlap with the active chase population usually means
+  // the wrong file was uploaded — call that out, but still surface the list.
+  const big = d.swapping>0 && d.deceasedAmongSwappers/d.swapping >= 0.5;
+  const totalCyl = rows.reduce((a,r)=>a+(+r.cyl||0),0);
+
+  const listRows = rows.map(r=>
+    '<tr><td class="cust">'+esc(r.cust)+'</td><td class="name">'+esc(r.name||"")+'</td>'
+    +'<td>'+(r.state?stateBadge(r.state):'<span class="pill zero">&mdash;</span>')+'</td>'
+    +'<td class="num"><b>'+r.cyl+'</b></td><td>'+esc(r.topEnd||"")+'</td><td>'+esc(r.phone||"")+'</td></tr>'
+  ).join("");
+
+  box.innerHTML=
+    '<div class="step"><span class="n bad">!</span><h2 style="color:var(--bad)">Flag to company — deceased with recent cylinder activity</h2></div>'
+    +'<p class="sub" style="margin-bottom:12px">'+rows.length+' customer'+(rows.length>1?'s':'')
+    +' on the deceased list had cylinder movements in the last 30 days ('+totalCyl+' cylinders total). '
+    +'A deceased patient should not be receiving or holding cylinders — these need flagging to the company.'
+    + (big ? ' <b style="color:var(--warn)">Note:</b> that’s '+d.deceasedAmongSwappers+' of '+d.swapping
+        +' active flagged patients — a share this high often means the wrong file was dropped in step 3, so verify a couple of names before mass-flagging.' : '')
+    +'</p>'
+    +'<div class="bar" style="margin-bottom:12px"><button class="primary" id="copyDeceasedActive" style="background:var(--bad)">Copy list to flag (CSV)</button></div>'
+    +'<div class="tablewrap"><table><thead><tr>'
+    +'<th>Customer</th><th>Name</th><th>Prescription</th><th>Cyl 30d</th><th>Expiry</th><th>Phone</th>'
+    +'</tr></thead><tbody>'+listRows+'</tbody></table></div>';
+
+  const cb=document.getElementById("copyDeceasedActive");
+  if(cb) cb.onclick=async ()=>{
+    const ok=await copyText(deceasedActiveCsv()); const o=cb.textContent;
+    cb.textContent= ok?"✓ Copied":"Copy failed"; setTimeout(()=>cb.textContent=o,1800);
+  };
+}
+
+function deceasedActiveCsv(){
+  const head=["Customer No.","Name","Prescription State","Cylinders last 30 days","Prescription Expiry","Consecutive Temps","Phone"];
+  const esc2=v=>{ const s=String(v==null?"":v); return /[",\r\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s; };
+  const lines=[head.join(",")].concat((DIAG.deceasedActive||[]).map(r=>[
+    r.cust, r.name, r.state, r.cyl, r.topEnd, r.consec, r.phone
+  ].map(esc2).join(",")));
+  return lines.join("\n");
 }
 
 /* ---------- sorting ---------- */
