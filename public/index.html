@@ -251,6 +251,8 @@
   </div>
 </div>
 
+<div id="buildBadge" style="position:fixed;bottom:6px;right:9px;font-size:10px;color:#3a4651;font-family:ui-monospace,Menlo,monospace;z-index:60"></div>
+
 <!-- Carer email editor -->
 <div id="editorOverlay" class="overlay">
   <div class="modal">
@@ -1561,6 +1563,8 @@
 
 <script>
 "use strict";
+const BUILD="2026-06-25 · r6 (sortable grouped view)";
+try{ document.getElementById("buildBadge").textContent="build "+BUILD; }catch(e){}
 /* ============================================================================
    Prescription Chaser — all processing is in-browser. Nothing is uploaded or
    persisted except the 24h "already emailed" memory (localStorage, emails only).

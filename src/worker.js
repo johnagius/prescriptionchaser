@@ -50,8 +50,16 @@ export default {
     }
 
     // Static assets (SPA fallback to index.html on 404).
-    const res = await env.ASSETS.fetch(request);
-    if (res.status === 404) return env.ASSETS.fetch(new URL("/index.html", request.url));
+    let res = await env.ASSETS.fetch(request);
+    if (res.status === 404) res = await env.ASSETS.fetch(new URL("/index.html", request.url));
+    // Never let the browser serve a stale app shell — always revalidate HTML so
+    // deploys show up immediately without a hard refresh.
+    const ct = res.headers.get("content-type") || "";
+    if (ct.includes("text/html")) {
+      const h = new Headers(res.headers);
+      h.set("cache-control", "no-store, must-revalidate");
+      res = new Response(res.body, { status: res.status, statusText: res.statusText, headers: h });
+    }
     return res;
   },
 };
