@@ -6,11 +6,12 @@ approvals**, who are **still actively swapping cylinders** (last 30 days), and w
 are **not on the deceased list**. It then lets you fire off the chase-up emails
 through Outlook with one click.
 
-> **Privacy:** every file you load is processed **entirely inside your browser**.
-> Nothing is uploaded, sent to a server, or stored anywhere. The only thing kept
-> between sessions is a local note of which email addresses you contacted in the
-> last 24 hours (so re-runs don't double-send) — and that lives only in your own
-> browser's `localStorage`.
+> **Privacy:** every patient file you load is processed **entirely inside your
+> browser** and never leaves it. Two small things are remembered between
+> sessions: a local 24h note of who you've emailed (browser `localStorage`,
+> never uploaded), and the **email corrections you choose to make**, which are
+> saved to a tiny Cloudflare KV store so they follow you across devices. Nothing
+> else — no patient lists, no contact files — is ever stored server-side.
 
 Deployed as a **Cloudflare Worker** that serves the static app from `public/`.
 
@@ -58,11 +59,39 @@ You get a sortable, filterable table of exactly who to chase:
 - **Cyl 30d** — cylinders swapped in the last 30 days.
 - **Email / Phone** — pulled from the Customer Data file.
 
-Click any column header to sort. Use the search box to filter. Email buttons
-open a pre-filled **Outlook compose** tab (one combined email per recipient, so
-an administrator with several patients gets a single message). Anyone emailed in
-the last 24h is greyed-out and skipped. Use **Open next 10** repeatedly with
-pop-ups allowed for the page.
+Click any column header to sort (in the flat view). Use the search box to
+filter by name, customer no, email, phone or state.
+
+**Carer grouping.** Patients are grouped under one **carer** when they share an
+email *or* a phone number, so a care home or relative who manages several
+patients gets a single combined email. Toggle **Group by carer** to switch
+between grouped sections and the flat sortable table.
+
+**Emailing.** Email buttons open a pre-filled **Outlook compose** tab for the
+whole carer (all their patients in one message). Anyone emailed in the last 24h
+is greyed-out and skipped. Use **Open next 10** repeatedly with pop-ups allowed.
+
+**Copy buttons.**
+- **Copy for email (tabs)** — tab-separated, paste straight into an email or
+  Word and it becomes a table (no Excel round-trip needed).
+- **Copy CSV** — comma-separated for Excel.
+
+**Editing emails (cloud-remembered).** The **✎** control on a carer opens an
+editor where you can:
+- **Replace** the carer's email — this renames that address *everywhere it
+  appears*, so every carer whose primary is that address updates at once, while
+  leaving any other address untouched.
+- **Add extra recipients** — additional `To:` addresses attached to that carer
+  (e.g. a second family member), without changing the primary.
+
+Per-patient **✎** (in the flat view's email cell) sets the email for just that
+one patient. All of these corrections are saved to Cloudflare KV and sync across
+your devices.
+
+**Flag to company.** Whenever a deceased patient shows cylinder movement in the
+last 30 days, they appear in a separate red report above the chase list, with a
+one-click CSV copy — cylinders being supplied to / not recovered from deceased
+patients are a compliance issue.
 
 ---
 
@@ -86,8 +115,10 @@ swapper.
 ```
 public/index.html     The whole app (self-contained: open it directly in a
                       browser, or serve it via the Worker).
-src/worker.js         Cloudflare Worker that serves public/ as static assets.
-wrangler.toml         Worker config.
+src/worker.js         Cloudflare Worker: serves public/ as static assets and
+                      exposes /api/overrides (email corrections) backed by KV.
+wrangler.toml         Worker config. The KV namespace binding (OVERRIDES) is
+                      auto-provisioned and appended by the deploy workflow.
 Expired/              Source of truth for the three BC console scripts + the
                       sample data files used to develop and test.
 build/inject-scripts.py   Copies the Expired/*.js scripts into the copy-code
@@ -113,8 +144,16 @@ npm run dev        # wrangler dev — local preview
 npm run deploy     # wrangler deploy — publish to Cloudflare
 ```
 
+Deployment is automated via `.github/workflows/deploy.yml` (push to `main` or the
+working branch). It uses the `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`
+repo secrets, and before deploying it **auto-creates the KV namespace**
+`prescriptionchaser-overrides` and binds it as `OVERRIDES`. If the API token
+lacks *Workers KV Storage* permission, the workflow logs a warning and deploys
+without cloud overrides — the app still works, falling back to local-only
+storage for email corrections.
+
 You can also just open `public/index.html` directly in Chrome — it works with no
-server at all.
+server at all (email overrides then persist locally instead of in the cloud).
 
 ### Run the test
 

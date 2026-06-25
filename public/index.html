@@ -83,6 +83,15 @@
   th.sorted .arrow{opacity:1;color:var(--accent)}
   tbody tr:hover{background:#1c242d}
   tr.sent{opacity:.5}
+  tr.carerhead{background:#13202a}
+  tr.carerhead td{border-top:2px solid var(--accent2);border-bottom:1px solid var(--line);padding-top:11px;padding-bottom:11px}
+  tr.carerhead:hover{background:#16252f}
+  .carerlabel{font-weight:700;color:var(--accent2);white-space:normal}
+  tr.carermember td:first-child{padding-left:22px}
+  .editmail{background:#0d1117;border:1px solid var(--line);color:var(--muted);border-radius:6px;
+    padding:2px 7px;font-size:12px;font-weight:600;margin-left:6px}
+  .editmail:hover{border-color:var(--accent);color:var(--ink)}
+  .ovr{color:var(--accent);font-size:12px;cursor:default}
   td.num{text-align:right;font-variant-numeric:tabular-nums}
   .cust{font-family:ui-monospace,Menlo,monospace;color:var(--accent2)}
   .name{font-weight:600;white-space:normal;min-width:180px}
@@ -112,13 +121,30 @@
   .empty{padding:40px;text-align:center;color:var(--muted)}
   .hidden{display:none}
   .footnote{color:var(--muted);font-size:12px;margin-top:18px;text-align:center}
+
+  /* carer email editor modal */
+  .overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:50;
+    align-items:flex-start;justify-content:center;padding:48px 16px;overflow:auto}
+  .modal{background:var(--panel);border:1px solid var(--line);border-radius:14px;width:100%;max-width:520px;
+    padding:0 22px 22px;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+  .modalhead{display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;
+    background:var(--panel);padding:18px 0 12px;border-bottom:1px solid var(--line);margin-bottom:16px}
+  .modalhead h3{margin:0;font-size:17px}
+  .modal .close{cursor:pointer;font-size:24px;line-height:1;color:var(--muted)}
+  .modal .close:hover{color:var(--ink)}
+  .elab{display:block;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-bottom:6px;font-weight:600}
+  .erow{display:flex;gap:8px;align-items:center}
+  .erow input{flex:1;background:#0d1117;border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:9px 12px;font-size:14px}
+  .erow input:disabled{opacity:.5}
+  .ehint{font-size:12px;color:var(--muted);margin-top:6px}
+  .ehint b{color:var(--ink)}
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1>Prescription Chaser</h1>
   <p class="sub">Find the oxygen patients you need to chase for a renewed prescription &mdash; expired or living on temporary approvals, still actively swapping cylinders, and not deceased.
-  <b style="color:var(--ok)">Everything runs in your browser. No file ever leaves this page or gets stored anywhere.</b></p>
+  <b style="color:var(--ok)">Your uploaded files are processed entirely in your browser and never leave it.</b> The only thing saved to the cloud is the email corrections you choose to make, so they follow you across devices.</p>
 
   <!-- STEP 1 -->
   <div class="card">
@@ -200,12 +226,15 @@
     <div class="stats" id="stats"></div>
 
     <div class="bar">
-      <input class="search" id="search" placeholder="Filter by name, customer no, email or state&hellip;">
+      <input class="search" id="search" placeholder="Filter by name, customer no, email, phone or state&hellip;">
+      <button class="primary" id="groupToggle">Group by carer: ON</button>
       <button class="primary" id="openAll">Open all visible emails</button>
       <button class="ghost" id="openBatch">Open next 10</button>
-      <button class="ghost" id="copyCsv">Copy result CSV</button>
+      <button class="ghost" id="copyTsv">Copy for email (tabs)</button>
+      <button class="ghost" id="copyCsv">Copy CSV</button>
       <button class="ghost" id="resetSent">Reset sent</button>
     </div>
+    <div class="sub" id="cloudHint" style="margin:-6px 0 14px"></div>
 
     <div class="tablewrap">
       <table>
@@ -214,7 +243,15 @@
       </table>
     </div>
     <div class="empty hidden" id="emptyMsg"></div>
-    <p class="footnote">Emailing groups patients by their email so an administrator with several patients gets one combined message. Anyone emailed in the last 24h is greyed-out and skipped, so you can safely re-run. Best practice: allow pop-ups for this page, then use <b>Open next 10</b> repeatedly.</p>
+    <p class="footnote"><b>Carers</b> are grouped when patients share an email <i>or</i> a phone number, so one carer gets one combined email. Use <b>✎</b> on a carer to replace its email everywhere or add extra recipients (remembered in the cloud). Anyone emailed in the last 24h is greyed-out and skipped. Best practice: allow pop-ups for this page, then use <b>Open next 10</b> repeatedly.</p>
+  </div>
+</div>
+
+<!-- Carer email editor -->
+<div id="editorOverlay" class="overlay">
+  <div class="modal">
+    <div class="modalhead"><h3>Carer recipients</h3><span class="close" onclick="closeEditor()">×</span></div>
+    <div id="editorBody"></div>
   </div>
 </div>
 
@@ -1787,8 +1824,78 @@ wireDrop("dropDec","decInput", files=>handleDeceased(files[0]));
    COMPUTE: watchlist  −  deceased  −  (no cylinder swap in 30d)  +  contacts
    ============================================================================ */
 let RESULTS=[];          // one row per patient to chase
-let GROUPS=new Map();    // email(lowercase) -> {email, patients:[{cust,name}]}
+let CARERS=[];           // connected-component carer groups (shared email or phone)
+let carerByCust=new Map();// customer no -> its carer group
 let DIAG={};             // computation diagnostics (counts + removed-as-deceased)
+
+/* ---------- email overrides (cloud-remembered) ----------
+   Three independent, email-keyed maps, persisted as one JSON blob to Cloudflare
+   KV via /api/overrides (follows the user across devices) and mirrored to
+   localStorage as an offline fallback:
+
+     rename : { baseEmail -> newEmail }   replace an email EVERYWHERE it appears
+     cc     : { baseEmail -> [extra…] }   extra To-recipients attached to that email
+     assign : { CUST -> email }           give/replace the email of ONE patient
+
+   Keying rename/cc by the *base* email is what makes "change X to Z" affect every
+   carer whose primary is X, while leaving Y (and any carer where Y appears
+   without X) untouched. */
+let OVERRIDES={rename:{},cc:{},assign:{}}, CLOUD_OK=false;
+const OV_LOCAL="emailOverridesV2";
+function normOv(o){ o=o||{}; return {rename:o.rename||{}, cc:o.cc||{}, assign:o.assign||{}}; }
+function loadLocalOverrides(){ try{ return normOv(JSON.parse(localStorage.getItem(OV_LOCAL))); }catch(e){ return normOv(); } }
+function saveLocalOverrides(){ try{ localStorage.setItem(OV_LOCAL, JSON.stringify(OVERRIDES)); }catch(e){} }
+function overrideCount(){ return Object.keys(OVERRIDES.rename).length + Object.keys(OVERRIDES.cc).length + Object.keys(OVERRIDES.assign).length; }
+async function loadOverrides(){
+  OVERRIDES=loadLocalOverrides();
+  try{
+    const r=await fetch("/api/overrides",{cache:"no-store"});
+    if(r.ok){ const j=await r.json(); CLOUD_OK=!!j.cloud; if(j.cloud) OVERRIDES=normOv(j.overrides); saveLocalOverrides(); }
+  }catch(e){ /* file:// or offline → local only */ }
+  updateCloudHint();
+}
+async function persistOverrides(){             // PUT the whole blob (single user)
+  saveLocalOverrides();
+  updateCloudHint();
+  compute();                                   // optimistic, instant UI (rebuilds carers + refreshes editor)
+  try{
+    const r=await fetch("/api/overrides",{method:"PUT",headers:{"content-type":"application/json"},body:JSON.stringify(OVERRIDES)});
+    if(r.ok){ const j=await r.json(); CLOUD_OK=!!j.cloud; }
+    else CLOUD_OK=false;
+  }catch(e){ CLOUD_OK=false; }
+  updateCloudHint();
+}
+const lc=s=>String(s||"").trim().toLowerCase();
+function baseEmailOf(r){ const a=OVERRIDES.assign[String(r.cust).toUpperCase()]; return ((a!=null?a:r.baseEmail)||"").trim(); }
+function renameOf(baseEmail){ if(!baseEmail) return ""; const k=lc(baseEmail); return (OVERRIDES.rename[k]||baseEmail).trim(); }
+function finalEmailOf(r){ return renameOf(baseEmailOf(r)); }
+function ccFor(baseEmail){ const a=OVERRIDES.cc[lc(baseEmail)]; return Array.isArray(a)?a:[]; }
+
+/* mutators (each persists + recomputes) */
+function setRename(baseEmail,newEmail){
+  const k=lc(baseEmail); if(!k) return;
+  if(!newEmail || lc(newEmail)===k) delete OVERRIDES.rename[k]; else OVERRIDES.rename[k]=newEmail.trim();
+  persistOverrides();
+}
+function setAssign(cust,email){
+  const k=String(cust).toUpperCase();
+  if(!email) delete OVERRIDES.assign[k]; else OVERRIDES.assign[k]=email.trim();
+  persistOverrides();
+}
+function addCc(baseEmail,email){
+  const k=lc(baseEmail); if(!k||!email) return;
+  const arr=OVERRIDES.cc[k]||[]; if(!arr.some(e=>lc(e)===lc(email))) arr.push(email.trim());
+  OVERRIDES.cc[k]=arr; persistOverrides();
+}
+function removeCc(baseEmail,email){
+  const k=lc(baseEmail); const arr=(OVERRIDES.cc[k]||[]).filter(e=>lc(e)!==lc(email));
+  if(arr.length) OVERRIDES.cc[k]=arr; else delete OVERRIDES.cc[k]; persistOverrides();
+}
+function updateCloudHint(){
+  const el=document.getElementById("cloudHint"); if(!el) return;
+  const n=overrideCount();
+  el.textContent = n? (n+" email override"+(n>1?"s":"")+" · "+(CLOUD_OK?"synced to cloud":"saved on this device only")) : "";
+}
 
 function isTempState(state){ return /temp/i.test(state||""); }
 
@@ -1832,15 +1939,17 @@ function compute(){
   RESULTS = swappers.filter(r=>!deceased.has(r.cust)).map(r=>{
     const c=contacts.get(r.cust)||{};
     const temp=isTempState(r.state);
-    return {
+    const row={
       ...r,
       cyl: cyl.get(r.cust)||0,
-      email: (c.email||"").trim(),
+      baseEmail: (c.email||"").trim(),
       phone: c.mobile || c.phone || "",
       contactName: c.name||"",
       // user rule: consecutive temps only count when the CURRENT state is a temporary approval
       relConsec: temp ? r.consec : 0
     };
+    row.email = finalEmailOf(row);   // base email + per-patient assign + global rename
+    return row;
   });
 
   DIAG = {
@@ -1852,17 +1961,11 @@ function compute(){
     deceasedActive
   };
 
-  // build email groups (one combined email per recipient)
-  GROUPS=new Map();
-  for(const r of RESULTS){
-    if(!r.email) continue;
-    const key=r.email.toLowerCase();
-    if(!GROUPS.has(key)) GROUPS.set(key,{email:r.email, patients:[]});
-    GROUPS.get(key).patients.push({cust:r.cust, name:r.name||r.contactName});
-  }
+  buildCarers();
 
   renderStats();
   applySort(); render();
+  refreshEditorIfOpen();
 }
 
 function renderStats(){
@@ -1874,7 +1977,7 @@ function renderStats(){
     {n:RESULTS.length, l:"to chase", c:"bad"},
     {n:tempCount, l:"on temporary approval", c:"warn"},
     {n:expiredCount, l:"expired (no temp)", c:""},
-    {n:GROUPS.size, l:"recipient emails", c:"ok"},
+    {n:CARERS.filter(g=>g.emails.length).length, l:"carer emails", c:"ok"},
     {n:noEmail, l:"missing an email", c: noEmail?"warn":""},
     {n:d.noSwap, l:"dropped · no swap in 30d", c:""},
     {n:d.deceasedAmongSwappers, l:"dropped · deceased", c: d.deceasedAmongSwappers?"warn":""}
@@ -1946,8 +2049,7 @@ const COLUMNS=[
   {k:"warn",    label:"Warn date",sort:r=>dateKey(r.warn)},
   {k:"email",   label:"Email",    sort:r=>r.email.toLowerCase()},
   {k:"phone",   label:"Phone",    sort:r=>r.phone},
-  {k:"action",  label:"",         sort:null},
-  {k:"trail",   label:"Trail",    sort:null}
+  {k:"action",  label:"",         sort:null}
 ];
 function dateKey(s){ const m=/(\d{1,2})\/(\d{1,2})\/(\d{4})/.exec(s||""); return m? (+m[3])*10000+(+m[2])*100+(+m[1]) : 0; }
 let sortKey="relConsec", sortDir=-1;
@@ -1980,21 +2082,62 @@ function applySort(){
   buildHead();
 }
 
+/* ---------- carer grouping (same email OR phone → one carer) ---------- */
+function normPhone(p){ const d=String(p||"").replace(/\D/g,""); return d.length>=6 ? d : ""; }
+function buildCarers(){
+  const rows=RESULTS;
+  const parent=rows.map((_,i)=>i);
+  const find=x=>{ while(parent[x]!==x){ parent[x]=parent[parent[x]]; x=parent[x]; } return x; };
+  const union=(a,b)=>{ parent[find(a)]=find(b); };
+  const emailMap=new Map(), phoneMap=new Map();
+  rows.forEach((r,i)=>{
+    const e=(r.email||"").toLowerCase();
+    if(e){ if(emailMap.has(e)) union(i,emailMap.get(e)); else emailMap.set(e,i); }
+    const p=normPhone(r.phone);
+    if(p){ if(phoneMap.has(p)) union(i,phoneMap.get(p)); else phoneMap.set(p,i); }
+  });
+  const byRoot=new Map();
+  rows.forEach((r,i)=>{
+    const root=find(i);
+    if(!byRoot.has(root)) byRoot.set(root,{patients:[],phones:[]});
+    const g=byRoot.get(root);
+    g.patients.push(r);
+    const ph=r.phone; if(ph && !g.phones.includes(ph)) g.phones.push(ph);
+  });
+  CARERS=[...byRoot.values()].map(g=>{
+    // distinct base emails behind this carer (pre-rename), primary first
+    g.baseEmails=[];
+    g.patients.forEach(p=>{ const b=baseEmailOf(p); if(b && !g.baseEmails.some(x=>lc(x)===lc(b))) g.baseEmails.push(b); });
+    g.primaryBase=g.baseEmails[0]||"";
+    // To-recipients: each base email (renamed) + its attached extra recipients
+    const to=[];
+    const push=e=>{ if(e && !to.some(x=>lc(x)===lc(e))) to.push(e); };
+    g.baseEmails.forEach(b=>{ push(renameOf(b)); ccFor(b).forEach(push); });
+    g.emails=to;
+    g.primaryEmail=to[0]||"";
+    g.label=g.primaryEmail || g.phones[0] || "(no contact)";
+    g.key=(g.primaryEmail||("phone:"+(g.phones[0]||""))).toLowerCase();
+    g.maxConsec=Math.max(...g.patients.map(p=>p.relConsec),0);
+    return g;
+  });
+  carerByCust=new Map();
+  CARERS.forEach(g=>g.patients.forEach(p=>carerByCust.set(p.cust,g)));
+}
+
 /* ---------- email composing (preserves the original Outlook-deeplink tool) ---------- */
 const STORE_KEY="oxygenEmailSends", WINDOW_MS=24*60*60*1000;
 function loadStore(){ try{ return JSON.parse(localStorage.getItem(STORE_KEY))||{}; }catch(e){ return {}; } }
 function saveStore(s){ try{ localStorage.setItem(STORE_KEY, JSON.stringify(s)); }catch(e){} }
 let store=loadStore();
-function sentRecently(email){ const t=store[email.toLowerCase()]; return t && (Date.now()-t)<WINDOW_MS; }
-function markSent(email){ store[email.toLowerCase()]=Date.now(); saveStore(store); }
-function sentCount(){ return Object.keys(store).filter(e=>(Date.now()-store[e])<WINDOW_MS).length; }
-function ago(email){ const t=store[email.toLowerCase()]; if(!t) return ""; const m=Math.round((Date.now()-t)/60000);
+function sentRecently(key){ const t=store[(key||"").toLowerCase()]; return t && (Date.now()-t)<WINDOW_MS; }
+function markSent(key){ store[(key||"").toLowerCase()]=Date.now(); saveStore(store); }
+function ago(key){ const t=store[(key||"").toLowerCase()]; if(!t) return ""; const m=Math.round((Date.now()-t)/60000);
   if(m<1) return "just now"; if(m<60) return m+"m ago"; return Math.round(m/60)+"h ago"; }
 
 const SUBJECT="Renewed medical oxygen prescription required";
 function emailBody(patients){
   const multi=patients.length>1;
-  const list=patients.map(p=>p.cust+" ∙ "+p.name).join("\n");
+  const list=patients.map(p=>p.cust+" ∙ "+(p.name||p.contactName||"")).join("\n");
   const intro=multi
     ? "Please send us scans of the renewed medical oxygen prescriptions for the following patients:"
     : "Please send us a scan of the renewed medical oxygen prescription for the following patient:";
@@ -2004,14 +2147,14 @@ function emailBody(patients){
   return "Dear Sir/Madam,\n\n"+intro+"\n\n"+list+"\n\n"+tail+"\n\nBr,\nJohn Agius\nPharmacist\nMultigas";
 }
 function composeUrl(g){
-  return "https://outlook.office.com/mail/deeplink/compose?to="+encodeURIComponent(g.email)
+  return "https://outlook.office.com/mail/deeplink/compose?to="+encodeURIComponent(g.emails.join(";"))
     +"&subject="+encodeURIComponent(SUBJECT)+"&body="+encodeURIComponent(emailBody(g.patients));
 }
 let blocked=0;
 function open1(g){
-  if(!g) return;
+  if(!g || !g.emails.length) return;
   const w=window.open(composeUrl(g),"_blank");
-  if(w) markSent(g.email); else blocked++;
+  if(w) markSent(g.key); else blocked++;
   render();
 }
 function reportBlocked(){
@@ -2019,22 +2162,77 @@ function reportBlocked(){
     +'Allow pop-ups for this page, then click "Open next 10" to continue.');
 }
 
-/* ---------- filtering / rendering ---------- */
-function filtered(){
-  const q=document.getElementById("search").value.trim().toLowerCase();
-  if(!q) return RESULTS;
-  return RESULTS.filter(r=>
-    (r.cust||"").toLowerCase().includes(q) ||
+/* ---------- email override editing (modal) ---------- */
+let editorCusts=null;                 // identifies the carer being edited (stable across recompute)
+function openCarerEditor(g){ editorCusts=g.patients.map(p=>p.cust); document.getElementById("editorOverlay").style.display="flex"; renderEditor(); }
+function closeEditor(){ editorCusts=null; document.getElementById("editorOverlay").style.display="none"; }
+function currentEditorCarer(){ if(!editorCusts) return null; for(const c of editorCusts){ const g=carerByCust.get(c); if(g) return g; } return null; }
+function refreshEditorIfOpen(){ if(editorCusts && document.getElementById("editorOverlay").style.display==="flex") renderEditor(); }
+
+function renderEditor(){
+  const g=currentEditorCarer(); const box=document.getElementById("editorBody");
+  if(!g){ closeEditor(); return; }
+  const cc=ccFor(g.primaryBase);
+  const phoneOnly=!g.primaryBase;
+  const patients=g.patients.map(p=>'<span class="cust">'+esc(p.cust)+'</span> '+esc(p.name||p.contactName||"")).join("<br>");
+  box.innerHTML=
+    '<p class="sub" style="margin:0 0 14px">'+g.patients.length+' patient'+(g.patients.length>1?'s':'')+' under this carer:<br>'+patients+'</p>'
+    +'<label class="elab">Primary email '+(phoneOnly?'<span class="cnt">(none yet — phone-linked carer)</span>':'')+'</label>'
+    +'<div class="erow"><input id="edPrimary" type="email" value="'+esc(g.primaryEmail)+'" placeholder="name@example.com">'
+    +'<button class="primary" id="edPrimarySave">Replace</button></div>'
+    +(phoneOnly?'':'<div class="ehint">Replacing this changes <b>'+esc(renameOf(g.primaryBase))+'</b> <i>everywhere it appears</i> — other carers and added recipients are not affected.</div>')
+    +'<label class="elab" style="margin-top:16px">Additional recipients (added to “To”)</label>'
+    +'<div class="chips" id="edCcList">'+(cc.length?cc.map(e=>'<span class="chip loaded">'+esc(e)+' <span class="x" data-rm="'+esc(e)+'">×</span></span>').join(''):'<span class="cnt">none</span>')+'</div>'
+    +'<div class="erow" style="margin-top:8px"><input id="edCc" type="email" placeholder="another carer email…" '+(phoneOnly?'disabled':'')+'>'
+    +'<button class="ghost" id="edCcAdd" '+(phoneOnly?'disabled':'')+'>Add</button></div>'
+    +(phoneOnly?'<div class="ehint">Set a primary email first, then you can attach extra recipients.</div>':'')
+    +'<div class="erow" style="margin-top:18px;justify-content:flex-end"><span class="cnt" style="margin-right:auto">All recipients: '+esc(g.emails.join("; ")||"—")+'</span>'
+    +'<button class="ghost" id="edDone">Done</button></div>';
+
+  document.getElementById("edPrimarySave").onclick=()=>{
+    const v=document.getElementById("edPrimary").value.trim();
+    if(phoneOnly) setAssign(g.patients[0].cust, v); else setRename(g.primaryBase, v);
+  };
+  document.getElementById("edPrimary").onkeydown=e=>{ if(e.key==="Enter") document.getElementById("edPrimarySave").click(); };
+  const add=()=>{ const v=document.getElementById("edCc").value.trim(); if(v) addCc(g.primaryBase, v); };
+  const addBtn=document.getElementById("edCcAdd"); if(addBtn) addBtn.onclick=add;
+  const ccInp=document.getElementById("edCc"); if(ccInp) ccInp.onkeydown=e=>{ if(e.key==="Enter") add(); };
+  box.querySelectorAll("#edCcList .x").forEach(x=> x.onclick=()=>removeCc(g.primaryBase, x.dataset.rm));
+  document.getElementById("edDone").onclick=closeEditor;
+}
+
+/* quick per-patient email (affects only this patient) */
+function editOneEmail(r){
+  const next=prompt("Set the email for "+(r.name||r.contactName||r.cust)+" ("+r.cust+").\n"
+    +"This affects only this patient and is remembered"+(CLOUD_OK?" in the cloud":" on this device")+".\nLeave blank to clear.", r.email||"");
+  if(next===null) return;
+  setAssign(r.cust, next.trim());
+}
+
+/* ---------- filtering ---------- */
+function matchesQuery(r,q){
+  return (r.cust||"").toLowerCase().includes(q) ||
     (r.name||"").toLowerCase().includes(q) ||
     (r.contactName||"").toLowerCase().includes(q) ||
     (r.email||"").toLowerCase().includes(q) ||
-    (r.state||"").toLowerCase().includes(q));
+    (r.phone||"").toLowerCase().includes(q) ||
+    (r.state||"").toLowerCase().includes(q);
 }
-function visibleGroups(){
-  const rows=filtered();
-  const emails=new Set(rows.map(r=>r.email.toLowerCase()).filter(Boolean));
-  return [...GROUPS.values()].filter(g=>emails.has(g.email.toLowerCase()));
+function filtered(){
+  const q=document.getElementById("search").value.trim().toLowerCase();
+  if(!q) return RESULTS;
+  return RESULTS.filter(r=>matchesQuery(r,q));
 }
+function visibleCarers(){
+  const set=new Set(filtered().map(r=>r.cust));
+  // a carer is visible if any of its patients match the filter; include all its patients when emailing
+  return CARERS.filter(g=>g.patients.some(p=>set.has(p.cust)) && g.emails.length);
+}
+
+/* ---------- view mode ---------- */
+let groupByCarer = (localStorage.getItem("groupByCarer") ?? "1")==="1";
+function setGroupMode(on){ groupByCarer=on; try{localStorage.setItem("groupByCarer",on?"1":"0");}catch(e){}
+  const btn=document.getElementById("groupToggle"); if(btn){ btn.textContent="Group by carer: "+(on?"ON":"OFF"); btn.classList.toggle("primary",on); btn.classList.toggle("ghost",!on);} render(); }
 
 function stateBadge(state){
   const cls = state==="Active Temp"?"b-activetemp" : state==="Expired Temp"?"b-expiredtemp" : "b-expired";
@@ -2047,54 +2245,105 @@ function consecPill(r){
 }
 function esc(s){ return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
 
+function emailCell(r){
+  const over = OVERRIDES[r.cust.toUpperCase()]!=null;
+  const txt = r.email ? esc(r.email) : '<span style="color:#5c6773;font-style:italic">no email</span>';
+  const tag = over ? ' <span class="ovr" title="custom email (saved)">★</span>' : '';
+  return '<td class="email'+(r.email?"":" none")+'">'+txt+tag
+    +' <button class="editmail" data-cust="'+esc(r.cust)+'" title="Replace email">✎</button></td>';
+}
+function patientCells(r){
+  return '<td class="cust">'+esc(r.cust)+'</td>'+
+    '<td class="name" title="'+esc(r.trail||r.decision||"")+'">'+esc(r.name||r.contactName)+'</td>'+
+    '<td>'+stateBadge(r.state)+'</td>'+
+    '<td class="num">'+consecPill(r)+'</td>'+
+    '<td class="num">'+r.total+'</td>'+
+    '<td class="num">'+r.cyl+'</td>'+
+    '<td>'+esc(r.topEnd)+'</td>'+
+    '<td>'+esc(r.warn)+'</td>'+
+    emailCell(r)+
+    '<td>'+esc(r.phone)+'</td>';
+}
+
 function render(){
-  const rows=filtered();
   const tb=document.getElementById("rows"), empty=document.getElementById("emptyMsg");
+  const rows=filtered();
   tb.innerHTML="";
   if(!rows.length){
     empty.classList.remove("hidden");
     empty.textContent = RESULTS.length ? "No rows match your filter." :
       "No one to chase — every flagged patient was either deceased or has had no cylinder swap in the last 30 days.";
+    document.getElementById("head").style.display="";
     return;
   }
   empty.classList.add("hidden");
+  if(groupByCarer) renderGrouped(rows); else renderFlat(rows);
+  wireRowButtons();
+}
+
+function renderFlat(rows){
+  document.getElementById("head").style.display="";
+  const tb=document.getElementById("rows");
   for(const r of rows){
-    const tr=document.createElement("tr");
-    const group=r.email ? GROUPS.get(r.email.toLowerCase()) : null;
-    const done=r.email && sentRecently(r.email);
-    if(done) tr.classList.add("sent");
-    const groupBadge = (group && group.patients.length>1) ? ' <span class="cnt" style="color:var(--accent2)">(+'+(group.patients.length-1)+')</span>' : "";
+    const g=carerByCust.get(r.cust);
+    const done=g && g.emails.length && sentRecently(g.key);
+    const tr=document.createElement("tr"); if(done) tr.classList.add("sent");
     let action;
-    if(!r.email) action='<button class="send none" disabled>no email</button>';
-    else if(done) action='<button class="send done" data-email="'+esc(r.email)+'">Sent '+ago(r.email)+'</button>';
-    else action='<button class="send" data-email="'+esc(r.email)+'">Email'+(group&&group.patients.length>1?" all "+group.patients.length:"")+'</button>';
-
-    const trail = r.trail ? '<details><summary>view</summary><div class="trail">'+esc(r.trail)+'</div></details>' : "";
-
-    tr.innerHTML=
-      '<td class="cust">'+esc(r.cust)+'</td>'+
-      '<td class="name">'+esc(r.name||r.contactName)+'</td>'+
-      '<td>'+stateBadge(r.state)+'</td>'+
-      '<td class="num">'+consecPill(r)+'</td>'+
-      '<td class="num">'+r.total+'</td>'+
-      '<td class="num">'+r.cyl+'</td>'+
-      '<td>'+esc(r.topEnd)+'</td>'+
-      '<td>'+esc(r.warn)+'</td>'+
-      '<td class="email'+(r.email?"":" none")+'">'+(r.email?esc(r.email)+groupBadge:"—")+'</td>'+
-      '<td>'+esc(r.phone)+'</td>'+
-      '<td>'+action+'</td>'+
-      '<td>'+trail+'</td>';
+    if(!g || !g.emails.length) action='<button class="send none" disabled>no email</button>';
+    else if(done) action='<button class="send done" data-key="'+esc(g.key)+'">Sent '+ago(g.key)+'</button>';
+    else action='<button class="send" data-key="'+esc(g.key)+'">Email'+(g.patients.length>1?" carer ("+g.patients.length+")":"")+'</button>';
+    tr.innerHTML=patientCells(r)+'<td>'+action+'</td>';
     tb.appendChild(tr);
   }
+}
+
+function renderGrouped(rows){
+  document.getElementById("head").style.display="none";
+  const tb=document.getElementById("rows");
+  const visibleCust=new Set(rows.map(r=>r.cust));
+  // carers that have at least one visible patient, worst (most consec temps) first
+  const groups=CARERS.filter(g=>g.patients.some(p=>visibleCust.has(p.cust)))
+    .sort((a,b)=> b.maxConsec-a.maxConsec || b.patients.length-a.patients.length || a.label.localeCompare(b.label));
+  for(const g of groups){
+    const done=g.emails.length && sentRecently(g.key);
+    const hdr=document.createElement("tr"); hdr.className="carerhead"+(done?" sent":"");
+    const contact = g.emails.length ? esc(g.emails.join(", ")) : (g.phones.length? esc(g.phones[0])+' <span class="cnt">(phone only)</span>' : '<i>no contact</i>');
+    let action;
+    if(!g.emails.length) action='<button class="send none" disabled>no email</button>';
+    else if(done) action='<button class="send done" data-key="'+esc(g.key)+'">Sent '+ago(g.key)+'</button>';
+    else action='<button class="send" data-key="'+esc(g.key)+'">Email all '+g.patients.length+'</button>';
+    const editBtn = '<button class="editmail" data-carerkey="'+esc(g.key)+'" title="Replace this carer\'s email">✎ email</button>';
+    hdr.innerHTML='<td colspan="9"><span class="carerlabel">'+contact+'</span> '
+      +'<span class="cnt">· '+g.patients.length+' patient'+(g.patients.length>1?'s':'')
+      +(g.phones.length?' · '+esc(g.phones.join(" / ")):'')+'</span> '+editBtn+'</td>'
+      +'<td colspan="2" style="text-align:right">'+action+'</td>';
+    tb.appendChild(hdr);
+    for(const r of g.patients.slice().sort((a,b)=>b.relConsec-a.relConsec)){
+      if(!visibleCust.has(r.cust)) continue;
+      const tr=document.createElement("tr"); tr.className="carermember"; if(done) tr.classList.add("sent");
+      tr.innerHTML=patientCells(r)+'<td></td>';
+      tb.appendChild(tr);
+    }
+  }
+}
+
+function wireRowButtons(){
+  const tb=document.getElementById("rows");
   tb.querySelectorAll("button.send:not(.none)").forEach(b=>{
-    b.onclick=()=>{ blocked=0; open1(GROUPS.get(b.dataset.email.toLowerCase())); };
+    b.onclick=()=>{ blocked=0; const g=CARERS.find(x=>x.key===b.dataset.key); open1(g); };
+  });
+  tb.querySelectorAll("button.editmail").forEach(b=>{
+    b.onclick=()=>{
+      if(b.dataset.carerkey){ const g=CARERS.find(x=>x.key===b.dataset.carerkey); if(g) openCarerEditor(g); }
+      else { const r=RESULTS.find(x=>x.cust===b.dataset.cust); if(r) editOneEmail(r); }
+    };
   });
 }
 
 /* ---------- bulk actions ---------- */
 function openMany(n){
   blocked=0;
-  let todo=visibleGroups().filter(g=>!sentRecently(g.email));
+  let todo=visibleCarers().filter(g=>!sentRecently(g.key));
   if(n) todo=todo.slice(0,n);
   todo.forEach((g,i)=> setTimeout(()=>{
     open1(g);
@@ -2107,19 +2356,46 @@ document.getElementById("openBatch").onclick=()=>openMany(10);
 document.getElementById("resetSent").onclick=()=>{
   if(confirm("Clear the record of who's been emailed in the last 24h?")){ store={}; saveStore(store); render(); }
 };
+document.getElementById("groupToggle").onclick=()=>setGroupMode(!groupByCarer);
 document.getElementById("search").addEventListener("input", render);
+document.getElementById("editorOverlay").addEventListener("click", e=>{ if(e.target.id==="editorOverlay") closeEditor(); });
+document.addEventListener("keydown", e=>{ if(e.key==="Escape") closeEditor(); });
+
+/* CSV (Excel) copy */
 document.getElementById("copyCsv").onclick=async ()=>{
-  const head=["Customer No.","Name","State","Consecutive Temps","Total Temps","Cylinders 30d","Expiry","Warn Date","Email","Phone","Decision"];
-  const esc=v=>{ const s=String(v==null?"":v); return /[",\r\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s; };
-  const lines=[head.join(",")].concat(filtered().map(r=>[
-    r.cust, r.name||r.contactName, r.state, r.relConsec, r.total, r.cyl, r.topEnd, r.warn, r.email, r.phone, r.decision
-  ].map(esc).join(",")));
-  const ok=await copyText(lines.join("\n"));
-  const btn=document.getElementById("copyCsv"); const old=btn.textContent;
-  btn.textContent= ok?"✓ Copied":"Copy failed"; setTimeout(()=>btn.textContent=old,1800);
+  const head=["Customer No.","Name","State","Consecutive Temps","Total Temps","Cylinders 30d","Expiry","Warn Date","Carer","Email","Phone","Decision"];
+  const e=v=>{ const s=String(v==null?"":v); return /[",\r\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s; };
+  const lines=[head.join(",")].concat(orderedRows().map(r=>{ const g=carerByCust.get(r.cust);
+    return [r.cust, r.name||r.contactName, r.state, r.relConsec, r.total, r.cyl, r.topEnd, r.warn, g?g.label:"", r.email, r.phone, r.decision].map(e).join(","); }));
+  await copyAndFlash("copyCsv", lines.join("\n"));
 };
+/* Tab-separated copy → paste straight into an email/Word as a table */
+document.getElementById("copyTsv").onclick=async ()=>{
+  const head=["Customer","Name","State","Consec Temps","Cyl 30d","Expiry","Email","Phone"];
+  const e=v=>String(v==null?"":v).replace(/[\t\r\n]/g," ").trim();
+  const lines=[head.join("\t")].concat(orderedRows().map(r=>
+    [r.cust, r.name||r.contactName, r.state, r.relConsec, r.cyl, r.topEnd, r.email, r.phone].map(e).join("\t")));
+  await copyAndFlash("copyTsv", lines.join("\n"));
+};
+/* rows in the same order the table shows them (grouped by carer or flat-sorted) */
+function orderedRows(){
+  const rows=filtered();
+  if(!groupByCarer) return rows;
+  const visibleCust=new Set(rows.map(r=>r.cust));
+  const out=[];
+  CARERS.filter(g=>g.patients.some(p=>visibleCust.has(p.cust)))
+    .sort((a,b)=> b.maxConsec-a.maxConsec || b.patients.length-a.patients.length || a.label.localeCompare(b.label))
+    .forEach(g=>g.patients.slice().sort((a,b)=>b.relConsec-a.relConsec).forEach(r=>{ if(visibleCust.has(r.cust)) out.push(r); }));
+  return out;
+}
+async function copyAndFlash(id,text){
+  const ok=await copyText(text); const btn=document.getElementById(id); const old=btn.textContent;
+  btn.textContent= ok?"✓ Copied":"Copy failed"; setTimeout(()=>btn.textContent=old,1800);
+}
 
 buildHead();
+setGroupMode(groupByCarer);
+loadOverrides().then(()=>{ if(DATA.watchlist && DATA.cylinders) compute(); });
 </script>
 </body>
 </html>
