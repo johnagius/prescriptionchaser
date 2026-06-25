@@ -124,6 +124,19 @@ await page.click('th[data-k="relConsec"]');
 const firstDesc = await page.evaluate(() => RESULTS[0].relConsec);
 console.log('sort relConsec asc-first/desc-first:', firstAsc, firstDesc);
 
+// 5b) grouped view must also rearrange on a header click (the reported bug)
+const groupedSort = await page.evaluate(() => {
+  setGroupMode(true);
+  // sort by Cyl 30d descending, capture the order the table/copy uses
+  sortKey='cyl'; sortDir=-1; applySort(); render();
+  const desc = orderedRows().map(r=>r.cyl);
+  sortKey='cyl'; sortDir=1; applySort(); render();
+  const asc = orderedRows().map(r=>r.cyl);
+  // first carer header label after sorting (proves groups reorder, not just members)
+  return { descFirst: desc[0], ascFirst: asc[0], rearranged: desc[0] !== asc[0], n: desc.length };
+});
+console.log('grouped sort by cyl:', JSON.stringify(groupedSort));
+
 // 6) compose URL sanity for a multi-patient group
 const url = await page.evaluate(() => {
   const g = CARERS.filter(x=>x.emails.length).sort((a,b)=>b.patients.length-a.patients.length)[0];
@@ -145,6 +158,7 @@ const fail = [];
 if (codeLen.customer < 1000 || codeLen.watchlist < 1000 || codeLen.cylinders < 1000) fail.push('embedded scripts too small');
 if (res.total <= 0) fail.push('no results computed');
 if (res.expiredWithConsec !== 0) fail.push('consec temps shown for non-temp state (rule violated)');
+if (!groupedSort.rearranged) fail.push('grouped view did not rearrange on column sort');
 if (res.badCyl !== 0) fail.push('result without cylinder swap leaked through');
 if (res.badDeceased !== 0) fail.push('deceased patient leaked through');
 if (res.meta.deceased <= 0) fail.push('xlsx deceased parse produced 0 ids');

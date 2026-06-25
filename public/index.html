@@ -2074,15 +2074,19 @@ function buildHead(){
     };
   });
 }
+/* one comparator, used by both the flat table and the grouped sections, so a
+   header click (or live filter) rearranges everything consistently */
+function cmpRows(a,b){
+  const col=COLUMNS.find(c=>c.k===sortKey)||COLUMNS.find(c=>c.k==="relConsec");
+  const va=col.sort(a), vb=col.sort(b);
+  let r = va<vb?-1 : va>vb?1 : 0;
+  r*=sortDir;
+  if(r) return r;
+  if(b.relConsec!==a.relConsec) return b.relConsec-a.relConsec;   // tie-break: worst abusers first
+  return String(a.name||a.contactName||"").localeCompare(String(b.name||b.contactName||""));
+}
 function applySort(){
-  const col=COLUMNS.find(c=>c.k===sortKey)||COLUMNS[3];
-  RESULTS.sort((a,b)=>{
-    const va=col.sort(a), vb=col.sort(b);
-    if(va<vb) return -1*sortDir; if(va>vb) return 1*sortDir;
-    // stable-ish tie-breakers: more consec temps, then name
-    if(b.relConsec!==a.relConsec) return b.relConsec-a.relConsec;
-    return (a.name||"").localeCompare(b.name||"");
-  });
+  RESULTS.sort(cmpRows);
   buildHead();
 }
 
@@ -2277,7 +2281,6 @@ function render(){
     empty.classList.remove("hidden");
     empty.textContent = RESULTS.length ? "No rows match your filter." :
       "No one to chase — every flagged patient was either deceased or has had no cylinder swap in the last 30 days.";
-    document.getElementById("head").style.display="";
     return;
   }
   empty.classList.add("hidden");
@@ -2286,7 +2289,6 @@ function render(){
 }
 
 function renderFlat(rows){
-  document.getElementById("head").style.display="";
   const tb=document.getElementById("rows");
   for(const r of rows){
     const g=carerByCust.get(r.cust);
@@ -2302,12 +2304,14 @@ function renderFlat(rows){
 }
 
 function renderGrouped(rows){
-  document.getElementById("head").style.display="none";
   const tb=document.getElementById("rows");
   const visibleCust=new Set(rows.map(r=>r.cust));
-  // carers that have at least one visible patient, worst (most consec temps) first
+  // Order carers by the current column sort: each carer's visible patients are
+  // sorted with the same comparator, and carers are ranked by their top patient,
+  // so a header click (or live filter) rearranges the whole grouped view.
   const groups=CARERS.filter(g=>g.patients.some(p=>visibleCust.has(p.cust)))
-    .sort((a,b)=> b.maxConsec-a.maxConsec || b.patients.length-a.patients.length || a.label.localeCompare(b.label));
+    .map(g=>{ g._visible=g.patients.filter(p=>visibleCust.has(p.cust)).sort(cmpRows); return g; })
+    .sort((a,b)=> cmpRows(a._visible[0], b._visible[0]) || b.patients.length-a.patients.length || a.label.localeCompare(b.label));
   for(const g of groups){
     const done=g.emails.length && sentRecently(g.key);
     const hdr=document.createElement("tr"); hdr.className="carerhead"+(done?" sent":"");
@@ -2324,8 +2328,7 @@ function renderGrouped(rows){
       +(g.phones.length?' · '+esc(g.phones.join(" / ")):'')+'</span> '+editBtn+'</td>'
       +'<td colspan="2" style="text-align:right">'+action+'</td>';
     tb.appendChild(hdr);
-    for(const r of g.patients.slice().sort((a,b)=>b.relConsec-a.relConsec)){
-      if(!visibleCust.has(r.cust)) continue;
+    for(const r of g._visible){
       const tr=document.createElement("tr"); tr.className="carermember"; if(done) tr.classList.add("sent");
       tr.innerHTML=patientCells(r)+'<td></td>';
       tb.appendChild(tr);
@@ -2385,13 +2388,14 @@ document.getElementById("copyTsv").onclick=async ()=>{
 };
 /* rows in the same order the table shows them (grouped by carer or flat-sorted) */
 function orderedRows(){
-  const rows=filtered();
+  const rows=filtered().slice().sort(cmpRows);
   if(!groupByCarer) return rows;
   const visibleCust=new Set(rows.map(r=>r.cust));
   const out=[];
   CARERS.filter(g=>g.patients.some(p=>visibleCust.has(p.cust)))
-    .sort((a,b)=> b.maxConsec-a.maxConsec || b.patients.length-a.patients.length || a.label.localeCompare(b.label))
-    .forEach(g=>g.patients.slice().sort((a,b)=>b.relConsec-a.relConsec).forEach(r=>{ if(visibleCust.has(r.cust)) out.push(r); }));
+    .map(g=>{ g._visible=g.patients.filter(p=>visibleCust.has(p.cust)).sort(cmpRows); return g; })
+    .sort((a,b)=> cmpRows(a._visible[0], b._visible[0]) || b.patients.length-a.patients.length || a.label.localeCompare(b.label))
+    .forEach(g=>g._visible.forEach(r=>out.push(r)));
   return out;
 }
 async function copyAndFlash(id,text){
